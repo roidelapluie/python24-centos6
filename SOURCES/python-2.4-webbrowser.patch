@@ -1,0 +1,22 @@
+--- Lib/webbrowser.py~	2005-09-15 10:29:38.000000000 +0300
++++ Lib/webbrowser.py	2005-11-17 19:48:20.000000000 +0200
+@@ -277,12 +277,17 @@
+ 
+     # X browsers have more in the way of options
+     if os.environ.get("DISPLAY"):
+-        _tryorder = ["galeon", "skipstone",
++        _tryorder = ["htmlview", "firefox", "galeon", "skipstone",
+                      "mozilla-firefox", "mozilla-firebird", "mozilla", "netscape",
+                      "kfm", "grail"] + _tryorder
+ 
++        # Try htmlview (in order to honor user config) before anything else.
++        if _iscommand("htmlview"):
++            register("htmlview", None, GenericBrowser(
++                "htmlview '%s' >/dev/null &"))
++
+         # First, the Netscape series
+-        for browser in ("mozilla-firefox", "mozilla-firebird",
++        for browser in ("firefox", "mozilla-firefox", "mozilla-firebird",
+                         "mozilla", "netscape"):
+             if _iscommand(browser):
+                 register(browser, None, Netscape(browser))

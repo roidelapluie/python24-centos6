@@ -1,0 +1,17 @@
+diff -up Python-2.4.3/Objects/obmalloc.c.obmalloc-overflow-fixes-from-r64114 Python-2.4.3/Objects/obmalloc.c
+--- Python-2.4.3/Objects/obmalloc.c.obmalloc-overflow-fixes-from-r64114	2010-03-05 18:36:20.000000000 -0500
++++ Python-2.4.3/Objects/obmalloc.c	2010-03-05 18:46:08.483042676 -0500
+@@ -526,10 +526,10 @@ new_arena(void)
+ 		numarenas = maxarenas ? maxarenas << 1 : INITIAL_ARENA_OBJECTS;
+ 		if (numarenas <= maxarenas)
+ 			return NULL;	/* overflow */
+-		nbytes = numarenas * sizeof(*arenas);
+-		if (nbytes / sizeof(*arenas) != numarenas)
++		if (numarenas > PY_SIZE_MAX / sizeof(*arenas))
+ 			return NULL;	/* overflow */
+-		arenaobj = realloc(arenas, nbytes);
++		nbytes = numarenas * sizeof(*arenas);
++		arenaobj = (struct arena_object *)realloc(arenas, nbytes);
+ 		if (arenaobj == NULL)
+ 			return NULL;
+ 		arenas = arenaobj;

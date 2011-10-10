@@ -1,0 +1,208 @@
+diff -up Python-2.4.3/Lib/test/test_urllib2.py.urllib2-no-proxy Python-2.4.3/Lib/test/test_urllib2.py
+--- Python-2.4.3/Lib/test/test_urllib2.py.urllib2-no-proxy	2005-08-24 18:20:46.000000000 -0400
++++ Python-2.4.3/Lib/test/test_urllib2.py	2010-11-30 19:31:19.000000000 -0500
+@@ -90,6 +90,7 @@ class FakeMethod:
+         return self.handle(self.meth_name, self.action, *args)
+ 
+ class MockHandler:
++    handler_order = 500
+     def __init__(self, methods):
+         self._define_methods(methods)
+     def _define_methods(self, methods):
+@@ -154,7 +155,7 @@ def add_ordered_mock_handlers(opener, me
+     for meths in meth_spec:
+         class MockHandlerSubclass(MockHandler): pass
+         h = MockHandlerSubclass(meths)
+-        h.handler_order = count
++        h.handler_order += count
+         h.add_parent(opener)
+         count = count + 1
+         handlers.append(h)
+@@ -636,6 +637,54 @@ class HandlerTests(unittest.TestCase):
+         o.open("http://www.example.com/")
+         self.assert_(not hh.req.has_header("Cookie"))
+ 
++    def test_proxy(self):
++        o = OpenerDirector()
++        ph = urllib2.ProxyHandler(dict(http="proxy.example.com:3128"))
++        o.add_handler(ph)
++        meth_spec = [
++            [("http_open", "return response")]
++            ]
++        handlers = add_ordered_mock_handlers(o, meth_spec)
++
++        req = Request("http://acme.example.com/")
++        self.assertEqual(req.get_host(), "acme.example.com")
++        r = o.open(req)
++        self.assertEqual(req.get_host(), "proxy.example.com:3128")
++
++        self.assertEqual([(handlers[0], "http_open")],
++                         [tup[0:2] for tup in o.calls])
++
++    def test_proxy_no_proxy(self):
++        os.environ['no_proxy'] = 'python.org'
++        o = OpenerDirector()
++        ph = urllib2.ProxyHandler(dict(http="proxy.example.com"))
++        o.add_handler(ph)
++        req = Request("http://www.perl.org/")
++        self.assertEqual(req.get_host(), "www.perl.org")
++        r = o.open(req)
++        self.assertEqual(req.get_host(), "proxy.example.com")
++        req = Request("http://www.python.org")
++        self.assertEqual(req.get_host(), "www.python.org")
++        r = o.open(req)
++        self.assertEqual(req.get_host(), "www.python.org")
++        del os.environ['no_proxy']
++
++
++    def test_proxy_https(self):
++        o = OpenerDirector()
++        ph = urllib2.ProxyHandler(dict(https='proxy.example.com:3128'))
++        o.add_handler(ph)
++        meth_spec = [
++            [("https_open","return response")]
++        ]
++        handlers = add_ordered_mock_handlers(o, meth_spec)
++        req = Request("https://www.example.com/")
++        self.assertEqual(req.get_host(), "www.example.com")
++        r = o.open(req)
++        self.assertEqual(req.get_host(), "proxy.example.com:3128")
++        self.assertEqual([(handlers[0], "https_open")],
++                         [tup[0:2] for tup in o.calls])
++
+ 
+ class MiscTests(unittest.TestCase):
+ 
+@@ -816,6 +865,7 @@ class NetworkTests(unittest.TestCase):
+ 
+ 
+ def test_main(verbose=None):
++    test_support.run_doctest(urllib2, verbose)
+     tests = (TrivialTests,
+              OpenerDirectorTests,
+              HandlerTests,
+diff -up Python-2.4.3/Lib/urllib2.py.urllib2-no-proxy Python-2.4.3/Lib/urllib2.py
+--- Python-2.4.3/Lib/urllib2.py.urllib2-no-proxy	2010-11-30 17:28:11.000000000 -0500
++++ Python-2.4.3/Lib/urllib2.py	2010-11-30 19:32:01.000000000 -0500
+@@ -118,7 +118,7 @@ from urllib import (unwrap, unquote, spl
+      splitattr, ftpwrapper, noheaders, splituser, splitpasswd, splitvalue)
+ 
+ # support for FileHandler, proxies via environment variables
+-from urllib import localhost, url2pathname, getproxies
++from urllib import localhost, url2pathname, getproxies, proxy_bypass
+ 
+ __version__ = "2.4"
+ 
+@@ -559,6 +559,80 @@ class HTTPRedirectHandler(BaseHandler):
+               "lead to an infinite loop.\n" \
+               "The last 30x error message was:\n"
+ 
++
++def _parse_proxy(proxy):
++    """Return (scheme, user, password, host/port) given a URL or an authority.
++
++    If a URL is supplied, it must have an authority (host:port) component.
++    According to RFC 3986, having an authority component means the URL must
++    have two slashes after the scheme:
++
++    >>> _parse_proxy('file:/ftp.example.com/')
++    Traceback (most recent call last):
++    ValueError: proxy URL with no authority: 'file:/ftp.example.com/'
++
++    The first three items of the returned tuple may be None.
++
++    Examples of authority parsing:
++
++    >>> _parse_proxy('proxy.example.com')
++    (None, None, None, 'proxy.example.com')
++    >>> _parse_proxy('proxy.example.com:3128')
++    (None, None, None, 'proxy.example.com:3128')
++
++    The authority component may optionally include userinfo (assumed to be
++    username:password):
++
++    >>> _parse_proxy('joe:password@proxy.example.com')
++    (None, 'joe', 'password', 'proxy.example.com')
++    >>> _parse_proxy('joe:password@proxy.example.com:3128')
++    (None, 'joe', 'password', 'proxy.example.com:3128')
++
++    Same examples, but with URLs instead:
++
++    >>> _parse_proxy('http://proxy.example.com/')
++    ('http', None, None, 'proxy.example.com')
++    >>> _parse_proxy('http://proxy.example.com:3128/')
++    ('http', None, None, 'proxy.example.com:3128')
++    >>> _parse_proxy('http://joe:password@proxy.example.com/')
++    ('http', 'joe', 'password', 'proxy.example.com')
++    >>> _parse_proxy('http://joe:password@proxy.example.com:3128')
++    ('http', 'joe', 'password', 'proxy.example.com:3128')
++
++    Everything after the authority is ignored:
++
++    >>> _parse_proxy('ftp://joe:password@proxy.example.com/rubbish:3128')
++    ('ftp', 'joe', 'password', 'proxy.example.com')
++
++    Test for no trailing '/' case:
++
++    >>> _parse_proxy('http://joe:password@proxy.example.com')
++    ('http', 'joe', 'password', 'proxy.example.com')
++
++    """
++    from urlparse import _splitnetloc
++    scheme, r_scheme = splittype(proxy)
++    if not r_scheme.startswith("/"):
++        # authority
++        scheme = None
++        authority = proxy
++    else:
++        # URL
++        if not r_scheme.startswith("//"):
++            raise ValueError("proxy URL with no authority: %r" % proxy)
++        # We have an authority, so for RFC 3986-compliant URLs (by ss 3.
++        # and 3.3.), path is empty or starts with '/'
++        end = r_scheme.find("/", 2)
++        if end == -1:
++            end = None
++        authority = r_scheme[2:end]
++    userinfo, hostport = splituser(authority)
++    if userinfo is not None:
++        user, password = splitpasswd(userinfo)
++    else:
++        user = password = None
++    return scheme, user, password, hostport
++
+ class ProxyHandler(BaseHandler):
+     # Proxies must be in front
+     handler_order = 100
+@@ -575,18 +649,18 @@ class ProxyHandler(BaseHandler):
+ 
+     def proxy_open(self, req, proxy, type):
+         orig_type = req.get_type()
+-        type, r_type = splittype(proxy)
+-        host, XXX = splithost(r_type)
+-        if '@' in host:
+-            user_pass, host = host.split('@', 1)
+-            if ':' in user_pass:
+-                user, password = user_pass.split(':', 1)
+-                user_pass = base64.encodestring('%s:%s' % (unquote(user),
+-                                                unquote(password))).strip()
+-                req.add_header('Proxy-authorization', 'Basic ' + user_pass)
+-        host = unquote(host)
+-        req.set_proxy(host, type)
+-        if orig_type == type:
++        proxy_type, user, password, hostport = _parse_proxy(proxy)
++        if proxy_type is None:
++            proxy_type = orig_type
++        if req.host and proxy_bypass(req.host):
++            return None
++        if user and password:
++            user_pass = '%s:%s' % (unquote(user), unquote(password))
++            creds = base64.encodestring(user_pass).strip()
++            req.add_header('Proxy-authorization', 'Basic ' + creds)
++        hostport = unquote(hostport)
++        req.set_proxy(hostport, proxy_type)
++        if orig_type == proxy_type:
+             # let other handlers take care of it
+             # XXX this only makes sense if the proxy is before the
+             # other handlers
+diff -up Python-2.4.3/Misc/NEWS.urllib2-no-proxy Python-2.4.3/Misc/NEWS

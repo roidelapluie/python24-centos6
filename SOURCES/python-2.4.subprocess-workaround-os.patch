@@ -1,0 +1,13 @@
+diff -ru Python-2.4.3-orig/Lib/os.py Python-2.4.3/Lib/os.py
+--- Python-2.4.3-orig/Lib/os.py	2005-07-04 13:16:53.000000000 -0400
++++ Python-2.4.3/Lib/os.py	2009-05-26 17:00:54.000000000 -0400
+@@ -351,8 +351,8 @@
+ 
+ __all__.extend(["execl","execle","execlp","execlpe","execvp","execvpe"])
+ 
++from errno import ENOENT, ENOTDIR
+ def _execvpe(file, args, env=None):
+-    from errno import ENOENT, ENOTDIR
+ 
+     if env is not None:
+         func = execve

@@ -1,0 +1,11 @@
+diff -up Python-2.4.3/Lib/test/test_pyclbr.py.fix-test-pyclbr Python-2.4.3/Lib/test/test_pyclbr.py
+--- Python-2.4.3/Lib/test/test_pyclbr.py.fix-test-pyclbr	2010-12-10 16:10:27.000000000 -0500
++++ Python-2.4.3/Lib/test/test_pyclbr.py	2010-12-10 16:11:33.000000000 -0500
+@@ -160,6 +160,7 @@ class PyclbrTest(TestCase):
+         cm('cgi', ignore=('log',))      # set with = in module
+         cm('mhlib')
+         cm('urllib', ignore=('getproxies_registry',
++                             'proxy_bypass_registry',
+                              'open_https',
+                              'getproxies_internetconfig',)) # not on all platforms
+         cm('pickle')

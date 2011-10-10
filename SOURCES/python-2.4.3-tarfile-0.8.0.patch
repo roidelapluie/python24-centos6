@@ -1,0 +1,2237 @@
+diff -up Python-2.4.3/Lib/tarfile.py.tarfile Python-2.4.3/Lib/tarfile.py
+--- Python-2.4.3/Lib/tarfile.py.tarfile	2005-10-28 02:00:51.000000000 -0400
++++ Python-2.4.3/Lib/tarfile.py	2010-09-07 17:43:10.000000000 -0400
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#! /usr/bin/env python2.4
+ # -*- coding: iso-8859-1 -*-
+ #-------------------------------------------------------------------
+ # tarfile.py
+@@ -30,13 +30,13 @@
+ """Read from and write to tar format archives.
+ """
+ 
+-__version__ = "$Revision: 41341 $"
++__version__ = "$Revision: 70530 $"
+ # $Source$
+ 
+-version     = "0.6.4"
++version     = "0.8.0"
+ __author__  = "Lars Gustäbel (lars@gustaebel.de)"
+-__date__    = "$Date: 2005-10-28 16:00:51 +1000 (Fri, 28 Oct 2005) $"
+-__cvsid__   = "$Id: tarfile.py 41341 2005-10-28 06:00:51Z neal.norwitz $"
++__date__    = "$Date: 2009-03-22 17:34:05 -0400 (Sun, 22 Mar 2009) $"
++__cvsid__   = "$Id: tarfile.py 70530 2009-03-22 21:34:05Z lars.gustaebel $"
+ __credits__ = "Gustavo Niemeyer, Niels Gustäbel, Richard Townsend."
+ 
+ #---------
+@@ -49,6 +49,7 @@ import stat
+ import errno
+ import time
+ import struct
++import copy
+ 
+ if sys.platform == 'mac':
+     # This module needs work for MacOS9, especially in the area of pathname
+@@ -132,10 +133,61 @@ TOEXEC  = 0001           # execute/searc
+ #---------------------------------------------------------
+ # Some useful functions
+ #---------------------------------------------------------
++
++def stn(s, length):
++    """Convert a python string to a null-terminated string buffer.
++    """
++    return s[:length] + (length - len(s)) * NUL
++
+ def nts(s):
+-    """Convert a null-terminated string buffer to a python string.
++    """Convert a null-terminated string field to a python string.
++    """
++    # Use the string up to the first null char.
++    p = s.find("\0")
++    if p == -1:
++        return s
++    return s[:p]
++
++def nti(s):
++    """Convert a number field to a python number.
+     """
+-    return s.rstrip(NUL)
++    # There are two possible encodings for a number field, see
++    # itn() below.
++    if s[0] != chr(0200):
++        n = int(nts(s) or "0", 8)
++    else:
++        n = 0L
++        for i in xrange(len(s) - 1):
++            n <<= 8
++            n += ord(s[i + 1])
++    return n
++
++def itn(n, digits=8, posix=False):
++    """Convert a python number to a number field.
++    """
++    # POSIX 1003.1-1988 requires numbers to be encoded as a string of
++    # octal digits followed by a null-byte, this allows values up to
++    # (8**(digits-1))-1. GNU tar allows storing numbers greater than
++    # that if necessary. A leading 0200 byte indicates this particular
++    # encoding, the following digits-1 bytes are a big-endian
++    # representation. This allows values up to (256**(digits-1))-1.
++    if 0 <= n < 8 ** (digits - 1):
++        s = "%0*o" % (digits - 1, n) + NUL
++    else:
++        if posix:
++            raise ValueError("overflow in number field")
++
++        if n < 0:
++            # XXX We mimic GNU tar's behaviour with negative numbers,
++            # this could raise OverflowError.
++            n = struct.unpack("L", struct.pack("l", n))[0]
++
++        s = ""
++        for i in xrange(digits - 1):
++            s = chr(n & 0377) + s
++            n >>= 8
++        s = chr(0200) + s
++    return s
+ 
+ def calc_chksum(buf):
+     """Calculate the checksum for a member's header. It's a simple addition
+@@ -148,6 +200,19 @@ def calc_chksum(buf):
+     for c in buf[156:]: chk += ord(c)   # sum up all bytes after chksum
+     return chk
+ 
++def calc_chksums(buf):
++    """Calculate the checksum for a member's header by summing up all
++       characters except for the chksum field which is treated as if
++       it was filled with spaces. According to the GNU tar sources,
++       some tars (Sun and NeXT) calculate chksum with signed char,
++       which will be different if there are chars in the buffer with
++       the high bit set. So we calculate two checksums, unsigned and
++       signed.
++    """
++    unsigned_chksum = 256 + sum(struct.unpack("148B", buf[:148]) + struct.unpack("356B", buf[156:512]))
++    signed_chksum = 256 + sum(struct.unpack("148b", buf[:148]) + struct.unpack("356b", buf[156:512]))
++    return unsigned_chksum, signed_chksum
++
+ def copyfileobj(src, dst, length=None):
+     """Copy length bytes from fileobj src to fileobj dst.
+        If length is None, copy the entire content.
+@@ -163,13 +228,13 @@ def copyfileobj(src, dst, length=None):
+     for b in xrange(blocks):
+         buf = src.read(BUFSIZE)
+         if len(buf) < BUFSIZE:
+-            raise IOError, "end of file reached"
++            raise IOError("end of file reached")
+         dst.write(buf)
+ 
+     if remainder != 0:
+         buf = src.read(remainder)
+         if len(buf) < remainder:
+-            raise IOError, "end of file reached"
++            raise IOError("end of file reached")
+         dst.write(buf)
+     return
+ 
+@@ -274,7 +339,7 @@ class _Stream:
+        _Stream is intended to be used only internally.
+     """
+ 
+-    def __init__(self, name, mode, type, fileobj, bufsize):
++    def __init__(self, name, mode, comptype, fileobj, bufsize):
+         """Construct a _Stream object.
+         """
+         self._extfileobj = True
+@@ -282,20 +347,26 @@ class _Stream:
+             fileobj = _LowLevelFile(name, mode)
+             self._extfileobj = False
+ 
+-        self.name    = name or ""
+-        self.mode    = mode
+-        self.type    = type
+-        self.fileobj = fileobj
+-        self.bufsize = bufsize
+-        self.buf     = ""
+-        self.pos     = 0L
+-        self.closed  = False
++        if comptype == '*':
++            # Enable transparent compression detection for the
++            # stream interface
++            fileobj = _StreamProxy(fileobj)
++            comptype = fileobj.getcomptype()
++
++        self.name     = name or ""
++        self.mode     = mode
++        self.comptype = comptype
++        self.fileobj  = fileobj
++        self.bufsize  = bufsize
++        self.buf      = ""
++        self.pos      = 0L
++        self.closed   = False
+ 
+-        if type == "gz":
++        if comptype == "gz":
+             try:
+                 import zlib
+             except ImportError:
+-                raise CompressionError, "zlib module is not available"
++                raise CompressionError("zlib module is not available")
+             self.zlib = zlib
+             self.crc = zlib.crc32("")
+             if mode == "r":
+@@ -303,11 +374,11 @@ class _Stream:
+             else:
+                 self._init_write_gz()
+ 
+-        if type == "bz2":
++        if comptype == "bz2":
+             try:
+                 import bz2
+             except ImportError:
+-                raise CompressionError, "bz2 module is not available"
++                raise CompressionError("bz2 module is not available")
+             if mode == "r":
+                 self.dbuf = ""
+                 self.cmp = bz2.BZ2Decompressor()
+@@ -315,7 +386,7 @@ class _Stream:
+                 self.cmp = bz2.BZ2Compressor()
+ 
+     def __del__(self):
+-        if not self.closed:
++        if hasattr(self, "closed") and not self.closed:
+             self.close()
+ 
+     def _init_write_gz(self):
+@@ -334,10 +405,10 @@ class _Stream:
+     def write(self, s):
+         """Write string s to the stream.
+         """
+-        if self.type == "gz":
++        if self.comptype == "gz":
+             self.crc = self.zlib.crc32(s, self.crc)
+         self.pos += len(s)
+-        if self.type != "tar":
++        if self.comptype != "tar":
+             s = self.cmp.compress(s)
+         self.__write(s)
+ 
+@@ -357,13 +428,20 @@ class _Stream:
+         if self.closed:
+             return
+ 
+-        if self.mode == "w" and self.type != "tar":
++        if self.mode == "w" and self.comptype != "tar":
+             self.buf += self.cmp.flush()
++
+         if self.mode == "w" and self.buf:
+             self.fileobj.write(self.buf)
+             self.buf = ""
+-            if self.type == "gz":
+-                self.fileobj.write(struct.pack("<l", self.crc))
++            if self.comptype == "gz":
++                # The native zlib crc is an unsigned 32-bit integer, but
++                # the Python wrapper implicitly casts that to a signed C
++                # long.  So, on a 32-bit box self.crc may "look negative",
++                # while the same crc on a 64-bit box may "look positive".
++                # To avoid irksome warnings from the `struct` module, force
++                # it to look positive on all boxes.
++                self.fileobj.write(struct.pack("<L", self.crc & 0xffffffffL))
+                 self.fileobj.write(struct.pack("<L", self.pos & 0xffffFFFFL))
+ 
+         if not self._extfileobj:
+@@ -379,9 +457,9 @@ class _Stream:
+ 
+         # taken from gzip.GzipFile with some alterations
+         if self.__read(2) != "\037\213":
+-            raise ReadError, "not a gzip file"
++            raise ReadError("not a gzip file")
+         if self.__read(1) != "\010":
+-            raise CompressionError, "unsupported compression method"
++            raise CompressionError("unsupported compression method")
+ 
+         flag = ord(self.__read(1))
+         self.__read(6)
+@@ -417,7 +495,7 @@ class _Stream:
+                 self.read(self.bufsize)
+             self.read(remainder)
+         else:
+-            raise StreamError, "seeking backwards is not allowed"
++            raise StreamError("seeking backwards is not allowed")
+         return self.pos
+ 
+     def read(self, size=None):
+@@ -441,7 +519,7 @@ class _Stream:
+     def _read(self, size):
+         """Return size bytes from the stream.
+         """
+-        if self.type == "tar":
++        if self.comptype == "tar":
+             return self.__read(size)
+ 
+         c = len(self.dbuf)
+@@ -474,148 +552,300 @@ class _Stream:
+         return t[:size]
+ # class _Stream
+ 
++class _StreamProxy(object):
++    """Small proxy class that enables transparent compression
++       detection for the Stream interface (mode 'r|*').
++    """
++
++    def __init__(self, fileobj):
++        self.fileobj = fileobj
++        self.buf = self.fileobj.read(BLOCKSIZE)
++
++    def read(self, size):
++        self.read = self.fileobj.read
++        return self.buf
++
++    def getcomptype(self):
++        if self.buf.startswith("\037\213\010"):
++            return "gz"
++        if self.buf.startswith("BZh91"):
++            return "bz2"
++        return "tar"
++
++    def close(self):
++        self.fileobj.close()
++# class StreamProxy
++
++class _BZ2Proxy(object):
++    """Small proxy class that enables external file object
++       support for "r:bz2" and "w:bz2" modes. This is actually
++       a workaround for a limitation in bz2 module's BZ2File
++       class which (unlike gzip.GzipFile) has no support for
++       a file object argument.
++    """
++
++    blocksize = 16 * 1024
++
++    def __init__(self, fileobj, mode):
++        self.fileobj = fileobj
++        self.mode = mode
++        self.init()
++
++    def init(self):
++        import bz2
++        self.pos = 0
++        if self.mode == "r":
++            self.bz2obj = bz2.BZ2Decompressor()
++            self.fileobj.seek(0)
++            self.buf = ""
++        else:
++            self.bz2obj = bz2.BZ2Compressor()
++
++    def read(self, size):
++        b = [self.buf]
++        x = len(self.buf)
++        while x < size:
++            raw = self.fileobj.read(self.blocksize)
++            if not raw:
++                break
++            try:
++                data = self.bz2obj.decompress(raw)
++            except EOFError:
++                break
++            b.append(data)
++            x += len(data)
++        self.buf = "".join(b)
++
++        buf = self.buf[:size]
++        self.buf = self.buf[size:]
++        self.pos += len(buf)
++        return buf
++
++    def seek(self, pos):
++        if pos < self.pos:
++            self.init()
++        self.read(pos - self.pos)
++
++    def tell(self):
++        return self.pos
++
++    def write(self, data):
++        self.pos += len(data)
++        raw = self.bz2obj.compress(data)
++        self.fileobj.write(raw)
++
++    def close(self):
++        if self.mode == "w":
++            raw = self.bz2obj.flush()
++            self.fileobj.write(raw)
++        self.fileobj.close()
++# class _BZ2Proxy
++
+ #------------------------
+ # Extraction file object
+ #------------------------
+-class ExFileObject(object):
+-    """File-like object for reading an archive member.
+-       Is returned by TarFile.extractfile(). Support for
+-       sparse files included.
++class _FileInFile(object):
++    """A thin wrapper around an existing file object that
++       provides a part of its data as an individual file
++       object.
+     """
+ 
+-    def __init__(self, tarfile, tarinfo):
+-        self.fileobj = tarfile.fileobj
+-        self.name    = tarinfo.name
+-        self.mode    = "r"
+-        self.closed  = False
+-        self.offset  = tarinfo.offset_data
+-        self.size    = tarinfo.size
+-        self.pos     = 0L
+-        self.linebuffer = ""
+-        if tarinfo.issparse():
+-            self.sparse = tarinfo.sparse
+-            self.read = self._readsparse
+-        else:
+-            self.read = self._readnormal
++    def __init__(self, fileobj, offset, size, sparse=None):
++        self.fileobj = fileobj
++        self.offset = offset
++        self.size = size
++        self.sparse = sparse
++        self.position = 0
+ 
+-    def __read(self, size):
+-        """Overloadable read method.
++    def tell(self):
++        """Return the current file position.
+         """
+-        return self.fileobj.read(size)
+-
+-    def readline(self, size=-1):
+-        """Read a line with approx. size. If size is negative,
+-           read a whole line. readline() and read() must not
+-           be mixed up (!).
+-        """
+-        if size < 0:
+-            size = sys.maxint
+-
+-        nl = self.linebuffer.find("\n")
+-        if nl >= 0:
+-            nl = min(nl, size)
+-        else:
+-            size -= len(self.linebuffer)
+-            while (nl < 0 and size > 0):
+-                buf = self.read(min(size, 100))
+-                if not buf:
+-                    break
+-                self.linebuffer += buf
+-                size -= len(buf)
+-                nl = self.linebuffer.find("\n")
+-            if nl == -1:
+-                s = self.linebuffer
+-                self.linebuffer = ""
+-                return s
+-        buf = self.linebuffer[:nl]
+-        self.linebuffer = self.linebuffer[nl + 1:]
+-        while buf[-1:] == "\r":
+-            buf = buf[:-1]
+-        return buf + "\n"
++        return self.position
+ 
+-    def readlines(self):
+-        """Return a list with all (following) lines.
++    def seek(self, position):
++        """Seek to a position in the file.
+         """
+-        result = []
+-        while True:
+-            line = self.readline()
+-            if not line: break
+-            result.append(line)
+-        return result
++        self.position = position
+ 
+-    def _readnormal(self, size=None):
+-        """Read operation for regular files.
++    def read(self, size=None):
++        """Read data from the file.
+         """
+-        if self.closed:
+-            raise ValueError, "file is closed"
+-        self.fileobj.seek(self.offset + self.pos)
+-        bytesleft = self.size - self.pos
+         if size is None:
+-            bytestoread = bytesleft
++            size = self.size - self.position
+         else:
+-            bytestoread = min(size, bytesleft)
+-        self.pos += bytestoread
+-        return self.__read(bytestoread)
++            size = min(size, self.size - self.position)
+ 
+-    def _readsparse(self, size=None):
+-        """Read operation for sparse files.
+-        """
+-        if self.closed:
+-            raise ValueError, "file is closed"
++        if self.sparse is None:
++            return self.readnormal(size)
++        else:
++            return self.readsparse(size)
+ 
+-        if size is None:
+-            size = self.size - self.pos
++    def readnormal(self, size):
++        """Read operation for regular files.
++        """
++        self.fileobj.seek(self.offset + self.position)
++        self.position += size
++        return self.fileobj.read(size)
+ 
++    def readsparse(self, size):
++        """Read operation for sparse files.
++        """
+         data = []
+         while size > 0:
+-            buf = self._readsparsesection(size)
++            buf = self.readsparsesection(size)
+             if not buf:
+                 break
+             size -= len(buf)
+             data.append(buf)
+         return "".join(data)
+ 
+-    def _readsparsesection(self, size):
++    def readsparsesection(self, size):
+         """Read a single section of a sparse file.
+         """
+-        section = self.sparse.find(self.pos)
++        section = self.sparse.find(self.position)
+ 
+         if section is None:
+             return ""
+ 
+-        toread = min(size, section.offset + section.size - self.pos)
++        size = min(size, section.offset + section.size - self.position)
++
+         if isinstance(section, _data):
+-            realpos = section.realpos + self.pos - section.offset
+-            self.pos += toread
++            realpos = section.realpos + self.position - section.offset
+             self.fileobj.seek(self.offset + realpos)
+-            return self.__read(toread)
++            self.position += size
++            return self.fileobj.read(size)
++        else:
++            self.position += size
++            return NUL * size
++#class _FileInFile
++
++
++class ExFileObject(object):
++    """File-like object for reading an archive member.
++       Is returned by TarFile.extractfile().
++    """
++    blocksize = 1024
++
++    def __init__(self, tarfile, tarinfo):
++        self.fileobj = _FileInFile(tarfile.fileobj,
++                                   tarinfo.offset_data,
++                                   tarinfo.size,
++                                   getattr(tarinfo, "sparse", None))
++        self.name = tarinfo.name
++        self.mode = "r"
++        self.closed = False
++        self.size = tarinfo.size
++
++        self.position = 0
++        self.buffer = ""
++
++    def read(self, size=None):
++        """Read at most size bytes from the file. If size is not
++           present or None, read all data until EOF is reached.
++        """
++        if self.closed:
++            raise ValueError("I/O operation on closed file")
++
++        buf = ""
++        if self.buffer:
++            if size is None:
++                buf = self.buffer
++                self.buffer = ""
++            else:
++                buf = self.buffer[:size]
++                self.buffer = self.buffer[size:]
++
++        if size is None:
++            buf += self.fileobj.read()
++        else:
++            buf += self.fileobj.read(size - len(buf))
++
++        self.position += len(buf)
++        return buf
++
++    def readline(self, size=-1):
++        """Read one entire line from the file. If size is present
++           and non-negative, return a string with at most that
++           size, which may be an incomplete line.
++        """
++        if self.closed:
++            raise ValueError("I/O operation on closed file")
++
++        if "\n" in self.buffer:
++            pos = self.buffer.find("\n") + 1
+         else:
+-            self.pos += toread
+-            return NUL * toread
++            buffers = [self.buffer]
++            while True:
++                buf = self.fileobj.read(self.blocksize)
++                buffers.append(buf)
++                if not buf or "\n" in buf:
++                    self.buffer = "".join(buffers)
++                    pos = self.buffer.find("\n") + 1
++                    if pos == 0:
++                        # no newline found.
++                        pos = len(self.buffer)
++                    break
++
++        if size != -1:
++            pos = min(size, pos)
++
++        buf = self.buffer[:pos]
++        self.buffer = self.buffer[pos:]
++        self.position += len(buf)
++        return buf
++
++    def readlines(self):
++        """Return a list with all remaining lines.
++        """
++        result = []
++        while True:
++            line = self.readline()
++            if not line: break
++            result.append(line)
++        return result
+ 
+     def tell(self):
+         """Return the current file position.
+         """
+-        return self.pos
++        if self.closed:
++            raise ValueError("I/O operation on closed file")
++
++        return self.position
+ 
+     def seek(self, pos, whence=0):
+         """Seek to a position in the file.
+         """
+-        self.linebuffer = ""
++        if self.closed:
++            raise ValueError("I/O operation on closed file")
++
+         if whence == 0:
+-            self.pos = min(max(pos, 0), self.size)
+-        if whence == 1:
++            self.position = min(max(pos, 0), self.size)
++        elif whence == 1:
+             if pos < 0:
+-                self.pos = max(self.pos + pos, 0)
++                self.position = max(self.position + pos, 0)
+             else:
+-                self.pos = min(self.pos + pos, self.size)
+-        if whence == 2:
+-            self.pos = max(min(self.size + pos, self.size), 0)
++                self.position = min(self.position + pos, self.size)
++        elif whence == 2:
++            self.position = max(min(self.size + pos, self.size), 0)
++        else:
++            raise ValueError("Invalid argument")
++
++        self.buffer = ""
++        self.fileobj.seek(self.position)
+ 
+     def close(self):
+         """Close the file object.
+         """
+         self.closed = True
++
++    def __iter__(self):
++        """Get an iterator over the file's lines.
++        """
++        while True:
++            line = self.readline()
++            if not line:
++                break
++            yield line
+ #class ExFileObject
+ 
+ #------------------
+@@ -633,126 +863,157 @@ class TarInfo(object):
+         """Construct a TarInfo object. name is the optional name
+            of the member.
+         """
++        self.name = name        # member name (dirnames must end with '/')
++        self.mode = 0666        # file permissions
++        self.uid = 0            # user id
++        self.gid = 0            # group id
++        self.size = 0           # file size
++        self.mtime = 0          # modification time
++        self.chksum = 0         # header checksum
++        self.type = REGTYPE     # member type
++        self.linkname = ""      # link name
++        self.uname = "user"     # user name
++        self.gname = "group"    # group name
++        self.devmajor = 0       # device major number
++        self.devminor = 0       # device minor number
+ 
+-        self.name     = name       # member name (dirnames must end with '/')
+-        self.mode     = 0666       # file permissions
+-        self.uid      = 0          # user id
+-        self.gid      = 0          # group id
+-        self.size     = 0          # file size
+-        self.mtime    = 0          # modification time
+-        self.chksum   = 0          # header checksum
+-        self.type     = REGTYPE    # member type
+-        self.linkname = ""         # link name
+-        self.uname    = "user"     # user name
+-        self.gname    = "group"    # group name
+-        self.devmajor = 0          #-
+-        self.devminor = 0          #-for use with CHRTYPE and BLKTYPE
+-        self.prefix   = ""         # prefix to filename or holding information
+-                                   # about sparse files
+-
+-        self.offset   = 0          # the tar header starts here
+-        self.offset_data = 0       # the file's data starts here
++        self.offset = 0         # the tar header starts here
++        self.offset_data = 0    # the file's data starts here
+ 
+     def __repr__(self):
+         return "<%s %r at %#x>" % (self.__class__.__name__,self.name,id(self))
+ 
++    @classmethod
+     def frombuf(cls, buf):
+         """Construct a TarInfo object from a 512 byte string buffer.
+         """
++        if len(buf) != BLOCKSIZE:
++            raise ValueError("truncated header")
++        if buf.count(NUL) == BLOCKSIZE:
++            raise ValueError("empty header")
++
+         tarinfo = cls()
+-        tarinfo.name   = nts(buf[0:100])
+-        tarinfo.mode   = int(buf[100:108], 8)
+-        tarinfo.uid    = int(buf[108:116],8)
+-        tarinfo.gid    = int(buf[116:124],8)
+-
+-        # There are two possible codings for the size field we
+-        # have to discriminate, see comment in tobuf() below.
+-        if buf[124] != chr(0200):
+-            tarinfo.size = long(buf[124:136], 8)
+-        else:
+-            tarinfo.size = 0L
+-            for i in range(11):
+-                tarinfo.size <<= 8
+-                tarinfo.size += ord(buf[125 + i])
+-
+-        tarinfo.mtime  = long(buf[136:148], 8)
+-        tarinfo.chksum = int(buf[148:156], 8)
+-        tarinfo.type   = buf[156:157]
++        tarinfo.buf = buf
++        tarinfo.name = nts(buf[0:100])
++        tarinfo.mode = nti(buf[100:108])
++        tarinfo.uid = nti(buf[108:116])
++        tarinfo.gid = nti(buf[116:124])
++        tarinfo.size = nti(buf[124:136])
++        tarinfo.mtime = nti(buf[136:148])
++        tarinfo.chksum = nti(buf[148:156])
++        tarinfo.type = buf[156:157]
+         tarinfo.linkname = nts(buf[157:257])
+-        tarinfo.uname  = nts(buf[265:297])
+-        tarinfo.gname  = nts(buf[297:329])
+-        try:
+-            tarinfo.devmajor = int(buf[329:337], 8)
+-            tarinfo.devminor = int(buf[337:345], 8)
+-        except ValueError:
+-            tarinfo.devmajor = tarinfo.devmajor = 0
+-        tarinfo.prefix = buf[345:500]
+-
+-        # Some old tar programs represent a directory as a regular
+-        # file with a trailing slash.
+-        if tarinfo.isreg() and tarinfo.name.endswith("/"):
+-            tarinfo.type = DIRTYPE
++        tarinfo.uname = nts(buf[265:297])
++        tarinfo.gname = nts(buf[297:329])
++        tarinfo.devmajor = nti(buf[329:337])
++        tarinfo.devminor = nti(buf[337:345])
++        prefix = nts(buf[345:500])
+ 
+-        # The prefix field is used for filenames > 100 in
+-        # the POSIX standard.
+-        # name = prefix + '/' + name
+-        if tarinfo.type != GNUTYPE_SPARSE:
+-            tarinfo.name = normpath(os.path.join(nts(tarinfo.prefix), tarinfo.name))
++        if prefix and not tarinfo.issparse():
++            tarinfo.name = prefix + "/" + tarinfo.name
+ 
+-        # Directory names should have a '/' at the end.
+-        if tarinfo.isdir():
+-            tarinfo.name += "/"
++        if tarinfo.chksum not in calc_chksums(buf):
++            raise ValueError("invalid header")
+         return tarinfo
+ 
+-    frombuf = classmethod(frombuf)
+-
+-    def tobuf(self):
+-        """Return a tar header block as a 512 byte string.
++    def tobuf(self, posix=False):
++        """Return a tar header as a string of 512 byte blocks.
+         """
+-        # Prefer the size to be encoded as 11 octal ascii digits
+-        # which is the most portable. If the size exceeds this
+-        # limit (>= 8 GB), encode it as an 88-bit value which is
+-        # a GNU tar feature.
+-        if self.size <= MAXSIZE_MEMBER:
+-            size = "%011o" % self.size
+-        else:
+-            s = self.size
+-            size = ""
+-            for i in range(11):
+-                size = chr(s & 0377) + size
+-                s >>= 8
+-            size = chr(0200) + size
+-
+-        # The following code was contributed by Detlef Lannert.
+-        parts = []
+-        for value, fieldsize in (
+-                (self.name, 100),
+-                ("%07o" % (self.mode & 07777), 8),
+-                ("%07o" % self.uid, 8),
+-                ("%07o" % self.gid, 8),
+-                (size, 12),
+-                ("%011o" % self.mtime, 12),
+-                ("        ", 8),
+-                (self.type, 1),
+-                (self.linkname, 100),
+-                (MAGIC, 6),
+-                (VERSION, 2),
+-                (self.uname, 32),
+-                (self.gname, 32),
+-                ("%07o" % self.devmajor, 8),
+-                ("%07o" % self.devminor, 8),
+-                (self.prefix, 155)
+-            ):
+-            l = len(value)
+-            parts.append(value[:fieldsize] + (fieldsize - l) * NUL)
+-
+-        buf = "".join(parts)
+-        chksum = calc_chksum(buf)
+-        buf = buf[:148] + "%06o\0" % chksum + buf[155:]
+-        buf += (BLOCKSIZE - len(buf)) * NUL
++        buf = ""
++        type = self.type
++        prefix = ""
++
++        if self.name.endswith("/"):
++            type = DIRTYPE
++
++        if type in (GNUTYPE_LONGNAME, GNUTYPE_LONGLINK):
++            # Prevent "././@LongLink" from being normalized.
++            name = self.name
++        else:
++            name = normpath(self.name)
++
++        if type == DIRTYPE:
++            # directories should end with '/'
++            name += "/"
++
++        linkname = self.linkname
++        if linkname:
++            # if linkname is empty we end up with a '.'
++            linkname = normpath(linkname)
++
++        if posix:
++            if self.size > MAXSIZE_MEMBER:
++                raise ValueError("file is too large (>= 8 GB)")
++
++            if len(self.linkname) > LENGTH_LINK:
++                raise ValueError("linkname is too long (>%d)" % (LENGTH_LINK))
++
++            if len(name) > LENGTH_NAME:
++                prefix = name[:LENGTH_PREFIX + 1]
++                while prefix and prefix[-1] != "/":
++                    prefix = prefix[:-1]
++
++                name = name[len(prefix):]
++                prefix = prefix[:-1]
++
++                if not prefix or len(name) > LENGTH_NAME:
++                    raise ValueError("name is too long")
++
++        else:
++            if len(self.linkname) > LENGTH_LINK:
++                buf += self._create_gnulong(self.linkname, GNUTYPE_LONGLINK)
++
++            if len(name) > LENGTH_NAME:
++                buf += self._create_gnulong(name, GNUTYPE_LONGNAME)
++
++        parts = [
++            stn(name, 100),
++            itn(self.mode & 07777, 8, posix),
++            itn(self.uid, 8, posix),
++            itn(self.gid, 8, posix),
++            itn(self.size, 12, posix),
++            itn(self.mtime, 12, posix),
++            "        ", # checksum field
++            type,
++            stn(self.linkname, 100),
++            stn(MAGIC, 6),
++            stn(VERSION, 2),
++            stn(self.uname, 32),
++            stn(self.gname, 32),
++            itn(self.devmajor, 8, posix),
++            itn(self.devminor, 8, posix),
++            stn(prefix, 155)
++        ]
++
++        buf += "".join(parts).ljust(BLOCKSIZE, NUL)
++        chksum = calc_chksums(buf[-BLOCKSIZE:])[0]
++        buf = buf[:-364] + "%06o\0" % chksum + buf[-357:]
+         self.buf = buf
+         return buf
+ 
++    def _create_gnulong(self, name, type):
++        """Create a GNU longname/longlink header from name.
++           It consists of an extended tar header, with the length
++           of the longname as size, followed by data blocks,
++           which contain the longname as a null terminated string.
++        """
++        name += NUL
++
++        tarinfo = self.__class__()
++        tarinfo.name = "././@LongLink"
++        tarinfo.type = type
++        tarinfo.mode = 0
++        tarinfo.size = len(name)
++
++        # create extended header
++        buf = tarinfo.tobuf()
++        # create name blocks
++        buf += name
++        blocks, remainder = divmod(len(name), BLOCKSIZE)
++        if remainder > 0:
++            buf += (BLOCKSIZE - remainder) * NUL
++        return buf
++
+     def isreg(self):
+         return self.type in REGULAR_TYPES
+     def isfile(self):
+@@ -805,31 +1066,34 @@ class TarFile(object):
+            can be determined, `mode' is overridden by `fileobj's mode.
+            `fileobj' is not closed, when TarFile is closed.
+         """
+-        self.name = name
+-
+         if len(mode) > 1 or mode not in "raw":
+-            raise ValueError, "mode must be 'r', 'a' or 'w'"
++            raise ValueError("mode must be 'r', 'a' or 'w'")
+         self._mode = mode
+         self.mode = {"r": "rb", "a": "r+b", "w": "wb"}[mode]
+ 
+         if not fileobj:
+-            fileobj = file(self.name, self.mode)
++            fileobj = file(name, self.mode)
+             self._extfileobj = False
+         else:
+-            if self.name is None and hasattr(fileobj, "name"):
+-                self.name = fileobj.name
++            if name is None and hasattr(fileobj, "name"):
++                name = fileobj.name
+             if hasattr(fileobj, "mode"):
+                 self.mode = fileobj.mode
+             self._extfileobj = True
++        if name:
++            self.name = os.path.abspath(name)
++        else:
++            self.name = None
+         self.fileobj = fileobj
+ 
+         # Init datastructures
+-        self.closed      = False
+-        self.members     = []       # list of members as TarInfo objects
+-        self._loaded     = False    # flag if all members have been read
+-        self.offset      = 0L       # current position in the archive file
+-        self.inodes      = {}       # dictionary caching the inodes of
+-                                    # archive members already added
++        self.closed = False
++        self.members = []       # list of members as TarInfo objects
++        self._loaded = False    # flag if all members have been read
++        self.offset = self.fileobj.tell()
++                                # current position in the archive file
++        self.inodes = {}        # dictionary caching the inodes of
++                                # archive members already added
+ 
+         if self._mode == "r":
+             self.firstmember = None
+@@ -863,12 +1127,13 @@ class TarFile(object):
+     # the super-constructor. A sub-constructor is registered and made available
+     # by adding it to the mapping in OPEN_METH.
+ 
++    @classmethod
+     def open(cls, name=None, mode="r", fileobj=None, bufsize=20*512):
+         """Open a tar archive for reading, writing or appending. Return
+            an appropriate TarFile class.
+ 
+            mode:
+-           'r'          open for reading with transparent compression
++           'r' or 'r:*' open for reading with transparent compression
+            'r:'         open for reading exclusively uncompressed
+            'r:gz'       open for reading with gzip compression
+            'r:bz2'      open for reading with bzip2 compression
+@@ -876,6 +1141,8 @@ class TarFile(object):
+            'w' or 'w:'  open for writing without compression
+            'w:gz'       open for writing with gzip compression
+            'w:bz2'      open for writing with bzip2 compression
++
++           'r|*'        open a stream of tar blocks with transparent compression
+            'r|'         open an uncompressed stream of tar blocks for reading
+            'r|gz'       open a gzip compressed stream of tar blocks
+            'r|bz2'      open a bzip2 compressed stream of tar blocks
+@@ -885,9 +1152,23 @@ class TarFile(object):
+         """
+ 
+         if not name and not fileobj:
+-            raise ValueError, "nothing to open"
++            raise ValueError("nothing to open")
++
++        if mode in ("r", "r:*"):
++            # Find out which *open() is appropriate for opening the file.
++            for comptype in cls.OPEN_METH:
++                func = getattr(cls, cls.OPEN_METH[comptype])
++                if fileobj is not None:
++                    saved_pos = fileobj.tell()
++                try:
++                    return func(name, "r", fileobj)
++                except (ReadError, CompressionError):
++                    if fileobj is not None:
++                        fileobj.seek(saved_pos)
++                    continue
++            raise ReadError("file could not be opened successfully")
+ 
+-        if ":" in mode:
++        elif ":" in mode:
+             filemode, comptype = mode.split(":", 1)
+             filemode = filemode or "r"
+             comptype = comptype or "tar"
+@@ -897,7 +1178,7 @@ class TarFile(object):
+             if comptype in cls.OPEN_METH:
+                 func = getattr(cls, cls.OPEN_METH[comptype])
+             else:
+-                raise CompressionError, "unknown compression type %r" % comptype
++                raise CompressionError("unknown compression type %r" % comptype)
+             return func(name, filemode, fileobj)
+ 
+         elif "|" in mode:
+@@ -906,109 +1187,76 @@ class TarFile(object):
+             comptype = comptype or "tar"
+ 
+             if filemode not in "rw":
+-                raise ValueError, "mode must be 'r' or 'w'"
++                raise ValueError("mode must be 'r' or 'w'")
+ 
+             t = cls(name, filemode,
+                     _Stream(name, filemode, comptype, fileobj, bufsize))
+             t._extfileobj = False
+             return t
+ 
+-        elif mode == "r":
+-            # Find out which *open() is appropriate for opening the file.
+-            for comptype in cls.OPEN_METH:
+-                func = getattr(cls, cls.OPEN_METH[comptype])
+-                try:
+-                    return func(name, "r", fileobj)
+-                except (ReadError, CompressionError):
+-                    continue
+-            raise ReadError, "file could not be opened successfully"
+-
+         elif mode in "aw":
+             return cls.taropen(name, mode, fileobj)
+ 
+-        raise ValueError, "undiscernible mode"
+-
+-    open = classmethod(open)
++        raise ValueError("undiscernible mode")
+ 
++    @classmethod
+     def taropen(cls, name, mode="r", fileobj=None):
+         """Open uncompressed tar archive name for reading or writing.
+         """
+         if len(mode) > 1 or mode not in "raw":
+-            raise ValueError, "mode must be 'r', 'a' or 'w'"
++            raise ValueError("mode must be 'r', 'a' or 'w'")
+         return cls(name, mode, fileobj)
+ 
+-    taropen = classmethod(taropen)
+-
++    @classmethod
+     def gzopen(cls, name, mode="r", fileobj=None, compresslevel=9):
+         """Open gzip compressed tar archive name for reading or writing.
+            Appending is not allowed.
+         """
+         if len(mode) > 1 or mode not in "rw":
+-            raise ValueError, "mode must be 'r' or 'w'"
++            raise ValueError("mode must be 'r' or 'w'")
+ 
+         try:
+             import gzip
+             gzip.GzipFile
+         except (ImportError, AttributeError):
+-            raise CompressionError, "gzip module is not available"
+-
+-        pre, ext = os.path.splitext(name)
+-        pre = os.path.basename(pre)
+-        if ext == ".tgz":
+-            ext = ".tar"
+-        if ext == ".gz":
+-            ext = ""
+-        tarname = pre + ext
++            raise CompressionError("gzip module is not available")
+ 
+         if fileobj is None:
+             fileobj = file(name, mode + "b")
+ 
+-        if mode != "r":
+-            name = tarname
+-
+         try:
+-            t = cls.taropen(tarname, mode,
+-                gzip.GzipFile(name, mode, compresslevel, fileobj)
+-            )
++            t = cls.taropen(name, mode,
++                gzip.GzipFile(name, mode, compresslevel, fileobj))
+         except IOError:
+-            raise ReadError, "not a gzip file"
++            raise ReadError("not a gzip file")
+         t._extfileobj = False
+         return t
+ 
+-    gzopen = classmethod(gzopen)
+-
++    @classmethod
+     def bz2open(cls, name, mode="r", fileobj=None, compresslevel=9):
+         """Open bzip2 compressed tar archive name for reading or writing.
+            Appending is not allowed.
+         """
+         if len(mode) > 1 or mode not in "rw":
+-            raise ValueError, "mode must be 'r' or 'w'."
++            raise ValueError("mode must be 'r' or 'w'.")
+ 
+         try:
+             import bz2
+         except ImportError:
+-            raise CompressionError, "bz2 module is not available"
+-
+-        pre, ext = os.path.splitext(name)
+-        pre = os.path.basename(pre)
+-        if ext == ".tbz2":
+-            ext = ".tar"
+-        if ext == ".bz2":
+-            ext = ""
+-        tarname = pre + ext
++            raise CompressionError("bz2 module is not available")
+ 
+         if fileobj is not None:
+-            raise ValueError, "no support for external file objects"
++            fileobj = _BZ2Proxy(fileobj, mode)
++        else:
++            fileobj = bz2.BZ2File(name, mode, compresslevel=compresslevel)
+ 
+         try:
+-            t = cls.taropen(tarname, mode, bz2.BZ2File(name, mode, compresslevel=compresslevel))
++            t = cls.taropen(name, mode, fileobj)
+         except IOError:
+-            raise ReadError, "not a bzip2 file"
++            raise ReadError("not a bzip2 file")
+         t._extfileobj = False
+         return t
+ 
+-    bz2open = classmethod(bz2open)
+-
+     # All *open() methods are registered here.
+     OPEN_METH = {
+         "tar": "taropen",   # uncompressed tar
+@@ -1047,7 +1295,7 @@ class TarFile(object):
+         """
+         tarinfo = self._getmember(name)
+         if tarinfo is None:
+-            raise KeyError, "filename %r not found" % name
++            raise KeyError("filename %r not found" % name)
+         return tarinfo
+ 
+     def getmembers(self):
+@@ -1208,8 +1456,7 @@ class TarFile(object):
+             arcname = name
+ 
+         # Skip if somebody tries to archive the archive...
+-        if self.name is not None \
+-            and os.path.abspath(name) == os.path.abspath(self.name):
++        if self.name is not None and os.path.abspath(name) == self.name:
+             self._dbg(2, "tarfile: Skipped %r" % name)
+             return
+ 
+@@ -1256,52 +1503,11 @@ class TarFile(object):
+         """
+         self._check("aw")
+ 
+-        tarinfo.name = normpath(tarinfo.name)
+-        if tarinfo.isdir():
+-            # directories should end with '/'
+-            tarinfo.name += "/"
+-
+-        if tarinfo.linkname:
+-            tarinfo.linkname = normpath(tarinfo.linkname)
+-
+-        if tarinfo.size > MAXSIZE_MEMBER:
+-            if self.posix:
+-                raise ValueError, "file is too large (>= 8 GB)"
+-            else:
+-                self._dbg(2, "tarfile: Created GNU tar largefile header")
+-
+-
+-        if len(tarinfo.linkname) > LENGTH_LINK:
+-            if self.posix:
+-                raise ValueError, "linkname is too long (>%d)" \
+-                                  % (LENGTH_LINK)
+-            else:
+-                self._create_gnulong(tarinfo.linkname, GNUTYPE_LONGLINK)
+-                tarinfo.linkname = tarinfo.linkname[:LENGTH_LINK -1]
+-                self._dbg(2, "tarfile: Created GNU tar extension LONGLINK")
+-
+-        if len(tarinfo.name) > LENGTH_NAME:
+-            if self.posix:
+-                prefix = tarinfo.name[:LENGTH_PREFIX + 1]
+-                while prefix and prefix[-1] != "/":
+-                    prefix = prefix[:-1]
+-
+-                name = tarinfo.name[len(prefix):]
+-                prefix = prefix[:-1]
++        tarinfo = copy.copy(tarinfo)
+ 
+-                if not prefix or len(name) > LENGTH_NAME:
+-                    raise ValueError, "name is too long (>%d)" \
+-                                      % (LENGTH_NAME)
+-
+-                tarinfo.name   = name
+-                tarinfo.prefix = prefix
+-            else:
+-                self._create_gnulong(tarinfo.name, GNUTYPE_LONGNAME)
+-                tarinfo.name = tarinfo.name[:LENGTH_NAME - 1]
+-                self._dbg(2, "tarfile: Created GNU tar extension LONGNAME")
+-
+-        self.fileobj.write(tarinfo.tobuf())
+-        self.offset += BLOCKSIZE
++        buf = tarinfo.tobuf(self.posix)
++        self.fileobj.write(buf)
++        self.offset += len(buf)
+ 
+         # If there's data to follow, append it.
+         if fileobj is not None:
+@@ -1314,6 +1520,43 @@ class TarFile(object):
+ 
+         self.members.append(tarinfo)
+ 
++    def extractall(self, path=".", members=None):
++        """Extract all members from the archive to the current working
++           directory and set owner, modification time and permissions on
++           directories afterwards. `path' specifies a different directory
++           to extract to. `members' is optional and must be a subset of the
++           list returned by getmembers().
++        """
++        directories = []
++
++        if members is None:
++            members = self
++
++        for tarinfo in members:
++            if tarinfo.isdir():
++                # Extract directories with a safe mode.
++                directories.append(tarinfo)
++                tarinfo = copy.copy(tarinfo)
++                tarinfo.mode = 0700
++            self.extract(tarinfo, path)
++
++        # Reverse sort directories.
++        directories.sort(lambda a, b: cmp(a.name, b.name))
++        directories.reverse()
++
++        # Set correct owner, mtime and filemode on directories.
++        for tarinfo in directories:
++            dirpath = os.path.join(path, tarinfo.name)
++            try:
++                self.chown(tarinfo, dirpath)
++                self.utime(tarinfo, dirpath)
++                self.chmod(tarinfo, dirpath)
++            except ExtractError, e:
++                if self.errorlevel > 1:
++                    raise
++                else:
++                    self._dbg(1, "tarfile: %s" % e)
++
+     def extract(self, member, path=""):
+         """Extract a member from the archive to the current working directory,
+            using its full name. Its file information is extracted as accurately
+@@ -1376,7 +1619,7 @@ class TarFile(object):
+                 # A small but ugly workaround for the case that someone tries
+                 # to extract a (sym)link as a file-object from a non-seekable
+                 # stream of tar blocks.
+-                raise StreamError, "cannot extract (sym)link as file object"
++                raise StreamError("cannot extract (sym)link as file object")
+             else:
+                 # A (sym)link's file object is its target's file object.
+                 return self.extractfile(self._getmember(tarinfo.linkname,
+@@ -1400,19 +1643,9 @@ class TarFile(object):
+         # Create all upper directories.
+         upperdirs = os.path.dirname(targetpath)
+         if upperdirs and not os.path.exists(upperdirs):
+-            ti = TarInfo()
+-            ti.name  = upperdirs
+-            ti.type  = DIRTYPE
+-            ti.mode  = 0777
+-            ti.mtime = tarinfo.mtime
+-            ti.uid   = tarinfo.uid
+-            ti.gid   = tarinfo.gid
+-            ti.uname = tarinfo.uname
+-            ti.gname = tarinfo.gname
+-            try:
+-                self._extract_member(ti, ti.name)
+-            except:
+-                pass
++            # Create directories that are not part of the archive with
++            # default permissions.
++            os.makedirs(upperdirs)
+ 
+         if tarinfo.islnk() or tarinfo.issym():
+             self._dbg(1, "%s -> %s" % (tarinfo.name, tarinfo.linkname))
+@@ -1448,7 +1681,9 @@ class TarFile(object):
+         """Make a directory called targetpath.
+         """
+         try:
+-            os.mkdir(targetpath)
++            # Use a safe mode for the directory, the real mode is set
++            # later in _extract_member().
++            os.mkdir(targetpath, 0700)
+         except EnvironmentError, e:
+             if e.errno != errno.EEXIST:
+                 raise
+@@ -1476,13 +1711,13 @@ class TarFile(object):
+         if hasattr(os, "mkfifo"):
+             os.mkfifo(targetpath)
+         else:
+-            raise ExtractError, "fifo not supported by system"
++            raise ExtractError("fifo not supported by system")
+ 
+     def makedev(self, tarinfo, targetpath):
+         """Make a character or block device called targetpath.
+         """
+         if not hasattr(os, "mknod") or not hasattr(os, "makedev"):
+-            raise ExtractError, "special devices not supported by system"
++            raise ExtractError("special devices not supported by system")
+ 
+         mode = tarinfo.mode
+         if tarinfo.isblk():
+@@ -1518,7 +1753,7 @@ class TarFile(object):
+                 try:
+                     shutil.copy2(linkpath, targetpath)
+                 except EnvironmentError, e:
+-                    raise IOError, "link could not be created"
++                    raise IOError("link could not be created")
+ 
+     def chown(self, tarinfo, targetpath):
+         """Set owner of targetpath according to tarinfo.
+@@ -1546,7 +1781,7 @@ class TarFile(object):
+                     if sys.platform != "os2emx":
+                         os.chown(targetpath, u, g)
+             except EnvironmentError, e:
+-                raise ExtractError, "could not change owner"
++                raise ExtractError("could not change owner")
+ 
+     def chmod(self, tarinfo, targetpath):
+         """Set file permissions of targetpath according to tarinfo.
+@@ -1555,7 +1790,7 @@ class TarFile(object):
+             try:
+                 os.chmod(targetpath, tarinfo.mode)
+             except EnvironmentError, e:
+-                raise ExtractError, "could not change mode"
++                raise ExtractError("could not change mode")
+ 
+     def utime(self, tarinfo, targetpath):
+         """Set modification time of targetpath according to tarinfo.
+@@ -1569,10 +1804,9 @@ class TarFile(object):
+         try:
+             os.utime(targetpath, (tarinfo.mtime, tarinfo.mtime))
+         except EnvironmentError, e:
+-            raise ExtractError, "could not change modification time"
++            raise ExtractError("could not change modification time")
+ 
+     #--------------------------------------------------------------------------
+-
+     def next(self):
+         """Return the next member of the archive as a TarInfo object, when
+            TarFile is opened for reading. Return None if there is no more
+@@ -1590,70 +1824,78 @@ class TarFile(object):
+             buf = self.fileobj.read(BLOCKSIZE)
+             if not buf:
+                 return None
++
+             try:
+                 tarinfo = TarInfo.frombuf(buf)
+-            except ValueError:
++
++                # Set the TarInfo object's offset to the current position of the
++                # TarFile and set self.offset to the position where the data blocks
++                # should begin.
++                tarinfo.offset = self.offset
++                self.offset += BLOCKSIZE
++
++                tarinfo = self.proc_member(tarinfo)
++
++            except ValueError, e:
+                 if self.ignore_zeros:
+-                    if buf.count(NUL) == BLOCKSIZE:
+-                        adj = "empty"
+-                    else:
+-                        adj = "invalid"
+-                    self._dbg(2, "0x%X: %s block" % (self.offset, adj))
++                    self._dbg(2, "0x%X: empty or invalid block: %s" %
++                              (self.offset, e))
+                     self.offset += BLOCKSIZE
+                     continue
+                 else:
+-                    # Block is empty or unreadable.
+                     if self.offset == 0:
+-                        # If the first block is invalid. That does not
+-                        # look like a tar archive we can handle.
+-                        raise ReadError,"empty, unreadable or compressed file"
++                        raise ReadError("empty, unreadable or compressed "
++                                        "file: %s" % e)
+                     return None
+             break
+ 
+-        # We shouldn't rely on this checksum, because some tar programs
+-        # calculate it differently and it is merely validating the
+-        # header block. We could just as well skip this part, which would
+-        # have a slight effect on performance...
+-        if tarinfo.chksum != calc_chksum(buf):
+-            self._dbg(1, "tarfile: Bad Checksum %r" % tarinfo.name)
+-
+-        # Set the TarInfo object's offset to the current position of the
+-        # TarFile and set self.offset to the position where the data blocks
+-        # should begin.
+-        tarinfo.offset = self.offset
+-        self.offset += BLOCKSIZE
+-
+-        # Check if the TarInfo object has a typeflag for which a callback
+-        # method is registered in the TYPE_METH. If so, then call it.
+-        if tarinfo.type in self.TYPE_METH:
+-            return self.TYPE_METH[tarinfo.type](self, tarinfo)
++        # Some old tar programs represent a directory as a regular
++        # file with a trailing slash.
++        if tarinfo.isreg() and tarinfo.name.endswith("/"):
++            tarinfo.type = DIRTYPE
+ 
+-        tarinfo.offset_data = self.offset
+-        if tarinfo.isreg() or tarinfo.type not in SUPPORTED_TYPES:
+-            # Skip the following data blocks.
+-            self.offset += self._block(tarinfo.size)
++        # Directory names should have a '/' at the end.
++        if tarinfo.isdir() and not tarinfo.name.endswith("/"):
++            tarinfo.name += "/"
+ 
+         self.members.append(tarinfo)
+         return tarinfo
+ 
+     #--------------------------------------------------------------------------
+-    # Below are some methods which are called for special typeflags in the
+-    # next() method, e.g. for unwrapping GNU longname/longlink blocks. They
+-    # are registered in TYPE_METH below. You can register your own methods
+-    # with this mapping.
+-    # A registered method is called with a TarInfo object as only argument.
+-    #
+-    # During its execution the method MUST perform the following tasks:
+-    # 1. set tarinfo.offset_data to the position where the data blocks begin,
+-    #    if there is data to follow.
+-    # 2. set self.offset to the position where the next member's header will
++    # The following are methods that are called depending on the type of a
++    # member. The entry point is proc_member() which is called with a TarInfo
++    # object created from the header block from the current offset. The
++    # proc_member() method can be overridden in a subclass to add custom
++    # proc_*() methods. A proc_*() method MUST implement the following
++    # operations:
++    # 1. Set tarinfo.offset_data to the position where the data blocks begin,
++    #    if there is data that follows.
++    # 2. Set self.offset to the position where the next member's header will
+     #    begin.
+-    # 3. append the tarinfo object to self.members, if it is supposed to appear
+-    #    as a member of the TarFile object.
+-    # 4. return tarinfo or another valid TarInfo object.
++    # 3. Return tarinfo or another valid TarInfo object.
++    def proc_member(self, tarinfo):
++        """Choose the right processing method for tarinfo depending
++           on its type and call it.
++        """
++        if tarinfo.type in (GNUTYPE_LONGNAME, GNUTYPE_LONGLINK):
++            return self.proc_gnulong(tarinfo)
++        elif tarinfo.type == GNUTYPE_SPARSE:
++            return self.proc_sparse(tarinfo)
++        else:
++            return self.proc_builtin(tarinfo)
++
++    def proc_builtin(self, tarinfo):
++        """Process a builtin type member or an unknown member
++           which will be treated as a regular file.
++        """
++        tarinfo.offset_data = self.offset
++        if tarinfo.isreg() or tarinfo.type not in SUPPORTED_TYPES:
++            # Skip the following data blocks.
++            self.offset += self._block(tarinfo.size)
++        return tarinfo
+ 
+     def proc_gnulong(self, tarinfo):
+-        """Evaluate the blocks that hold a GNU longname
++        """Process the blocks that hold a GNU longname
+            or longlink member.
+         """
+         buf = ""
+@@ -1664,9 +1906,15 @@ class TarFile(object):
+             self.offset += BLOCKSIZE
+             count -= BLOCKSIZE
+ 
+-        # Fetch the next header
+-        next = self.next()
++        # Fetch the next header and process it.
++        b = self.fileobj.read(BLOCKSIZE)
++        t = TarInfo.frombuf(b)
++        t.offset = self.offset
++        self.offset += BLOCKSIZE
++        next = self.proc_member(t)
+ 
++        # Patch the TarInfo object from the next header with
++        # the longname information.
+         next.offset = tarinfo.offset
+         if tarinfo.type == GNUTYPE_LONGNAME:
+             next.name = nts(buf)
+@@ -1676,9 +1924,9 @@ class TarFile(object):
+         return next
+ 
+     def proc_sparse(self, tarinfo):
+-        """Analyze a GNU sparse header plus extra headers.
++        """Process a GNU sparse header plus extra headers.
+         """
+-        buf = tarinfo.tobuf()
++        buf = tarinfo.buf
+         sp = _ringbuffer()
+         pos = 386
+         lastpos = 0L
+@@ -1687,8 +1935,8 @@ class TarFile(object):
+         # first header.
+         for i in xrange(4):
+             try:
+-                offset = int(buf[pos:pos + 12], 8)
+-                numbytes = int(buf[pos + 12:pos + 24], 8)
++                offset = nti(buf[pos:pos + 12])
++                numbytes = nti(buf[pos + 12:pos + 24])
+             except ValueError:
+                 break
+             if offset > lastpos:
+@@ -1699,7 +1947,7 @@ class TarFile(object):
+             pos += 24
+ 
+         isextended = ord(buf[482])
+-        origsize = int(buf[483:495], 8)
++        origsize = nti(buf[483:495])
+ 
+         # If the isextended flag is given,
+         # there are extra headers to process.
+@@ -1709,8 +1957,8 @@ class TarFile(object):
+             pos = 0
+             for i in xrange(21):
+                 try:
+-                    offset = int(buf[pos:pos + 12], 8)
+-                    numbytes = int(buf[pos + 12:pos + 24], 8)
++                    offset = nti(buf[pos:pos + 12])
++                    numbytes = nti(buf[pos + 12:pos + 24])
+                 except ValueError:
+                     break
+                 if offset > lastpos:
+@@ -1730,18 +1978,8 @@ class TarFile(object):
+         self.offset += self._block(tarinfo.size)
+         tarinfo.size = origsize
+ 
+-        self.members.append(tarinfo)
+         return tarinfo
+ 
+-    # The type mapping for the next() method. The keys are single character
+-    # strings, the typeflag. The values are methods which are called when
+-    # next() encounters such a typeflag.
+-    TYPE_METH = {
+-        GNUTYPE_LONGNAME: proc_gnulong,
+-        GNUTYPE_LONGLINK: proc_gnulong,
+-        GNUTYPE_SPARSE:   proc_sparse
+-    }
+-
+     #--------------------------------------------------------------------------
+     # Little helper methods:
+ 
+@@ -1785,9 +2023,9 @@ class TarFile(object):
+            corresponds to TarFile's mode.
+         """
+         if self.closed:
+-            raise IOError, "%s is closed" % self.__class__.__name__
++            raise IOError("%s is closed" % self.__class__.__name__)
+         if mode is not None and self._mode not in mode:
+-            raise IOError, "bad operation for mode %r" % self._mode
++            raise IOError("bad operation for mode %r" % self._mode)
+ 
+     def __iter__(self):
+         """Provide an iterator object.
+@@ -1797,31 +2035,6 @@ class TarFile(object):
+         else:
+             return TarIter(self)
+ 
+-    def _create_gnulong(self, name, type):
+-        """Write a GNU longname/longlink member to the TarFile.
+-           It consists of an extended tar header, with the length
+-           of the longname as size, followed by data blocks,
+-           which contain the longname as a null terminated string.
+-        """
+-        name += NUL
+-
+-        tarinfo = TarInfo()
+-        tarinfo.name = "././@LongLink"
+-        tarinfo.type = type
+-        tarinfo.mode = 0
+-        tarinfo.size = len(name)
+-
+-        # write extended header
+-        self.fileobj.write(tarinfo.tobuf())
+-        self.offset += BLOCKSIZE
+-        # write name blocks
+-        self.fileobj.write(name)
+-        blocks, remainder = divmod(tarinfo.size, BLOCKSIZE)
+-        if remainder > 0:
+-            self.fileobj.write(NUL * (BLOCKSIZE - remainder))
+-            blocks += 1
+-        self.offset += blocks * BLOCKSIZE
+-
+     def _dbg(self, level, msg):
+         """Write debugging output to sys.stderr.
+         """
+@@ -1923,11 +2136,10 @@ class TarFileCompat:
+         elif compression == TAR_GZIPPED:
+             self.tarfile = TarFile.gzopen(file, mode)
+         else:
+-            raise ValueError, "unknown compression constant"
++            raise ValueError("unknown compression constant")
+         if mode[0:1] == "r":
+             members = self.tarfile.getmembers()
+-            for i in xrange(len(members)):
+-                m = members[i]
++            for m in members:
+                 m.filename = m.name
+                 m.file_size = m.size
+                 m.date_time = time.gmtime(m.mtime)[:6]
+@@ -1947,12 +2159,15 @@ class TarFileCompat:
+     def write(self, filename, arcname=None, compress_type=None):
+         self.tarfile.add(filename, arcname)
+     def writestr(self, zinfo, bytes):
+-        import StringIO
++        try:
++            from cStringIO import StringIO
++        except ImportError:
++            from StringIO import StringIO
+         import calendar
+         zinfo.name = zinfo.filename
+         zinfo.size = zinfo.file_size
+         zinfo.mtime = calendar.timegm(zinfo.date_time)
+-        self.tarfile.addfile(zinfo, StringIO.StringIO(bytes))
++        self.tarfile.addfile(zinfo, StringIO(bytes))
+     def close(self):
+         self.tarfile.close()
+ #class TarFileCompat
+diff -up Python-2.4.3/Lib/test/test_tarfile.py.tarfile Python-2.4.3/Lib/test/test_tarfile.py
+--- Python-2.4.3/Lib/test/test_tarfile.py.tarfile	2005-10-28 02:00:51.000000000 -0400
++++ Python-2.4.3/Lib/test/test_tarfile.py	2010-09-07 17:22:16.000000000 -0400
+@@ -2,6 +2,7 @@ import sys
+ import os
+ import shutil
+ import tempfile
++import StringIO
+ 
+ import unittest
+ import tarfile
+@@ -25,7 +26,7 @@ def path(path):
+ testtar = path("testtar.tar")
+ tempdir = os.path.join(tempfile.gettempdir(), "testtar" + os.extsep + "dir")
+ tempname = test_support.TESTFN
+-membercount = 10
++membercount = 13
+ 
+ def tarname(comp=""):
+     if not comp:
+@@ -86,18 +87,34 @@ class ReadTest(BaseTest):
+         if self.sep != "|":
+             filename = "0-REGTYPE-TEXT"
+             self.tar.extract(filename, dirname())
+-            lines1 = file(os.path.join(dirname(), filename), "rU").readlines()
++            f = open(os.path.join(dirname(), filename), "rU")
++            lines1 = f.readlines()
++            f.close()
+             lines2 = self.tar.extractfile(filename).readlines()
+             self.assert_(lines1 == lines2,
+                          "_FileObject.readline() does not work correctly")
+ 
++    def test_iter(self):
++        # Test iteration over ExFileObject.
++        if self.sep != "|":
++            filename = "0-REGTYPE-TEXT"
++            self.tar.extract(filename, dirname())
++            f = open(os.path.join(dirname(), filename), "rU")
++            lines1 = f.readlines()
++            f.close()
++            lines2 = [line for line in self.tar.extractfile(filename)]
++            self.assert_(lines1 == lines2,
++                         "ExFileObject iteration does not work correctly")
++
+     def test_seek(self):
+         """Test seek() method of _FileObject, incl. random reading.
+         """
+         if self.sep != "|":
+-            filename = "0-REGTYPE"
++            filename = "0-REGTYPE-TEXT"
+             self.tar.extract(filename, dirname())
+-            data = file(os.path.join(dirname(), filename), "rb").read()
++            f = open(os.path.join(dirname(), filename), "rb")
++            data = f.read()
++            f.close()
+ 
+             tarinfo = self.tar.getmember(filename)
+             fobj = self.tar.extractfile(tarinfo)
+@@ -132,6 +149,16 @@ class ReadTest(BaseTest):
+             s2 = fobj.readlines()
+             self.assert_(s1 == s2,
+                          "readlines() after seek failed")
++            fobj.seek(0)
++            self.assert_(len(fobj.readline()) == fobj.tell(),
++                         "tell() after readline() failed")
++            fobj.seek(512)
++            self.assert_(len(fobj.readline()) + 512 == fobj.tell(),
++                         "tell() after seek() and readline() failed")
++            fobj.seek(0)
++            line = fobj.readline()
++            self.assert_(fobj.read() == data[len(line):],
++                         "read() after readline() failed")
+             fobj.close()
+ 
+     def test_old_dirtype(self):
+@@ -145,18 +172,65 @@ class ReadTest(BaseTest):
+         tarinfo = tarfile.TarInfo("directory/")
+         tarinfo.type = tarfile.REGTYPE
+ 
+-        fobj = file(filename, "w")
++        fobj = open(filename, "w")
+         fobj.write(tarinfo.tobuf())
+         fobj.close()
+ 
+-        # Test if it is still a directory entry when
+-        # read back.
+-        tar = tarfile.open(filename)
+-        tarinfo = tar.getmembers()[0]
++        try:
++            # Test if it is still a directory entry when
++            # read back.
++            tar = tarfile.open(filename)
++            tarinfo = tar.getmembers()[0]
++            tar.close()
++
++            self.assert_(tarinfo.type == tarfile.DIRTYPE)
++            self.assert_(tarinfo.name.endswith("/"))
++        finally:
++            try:
++                os.unlink(filename)
++            except:
++                pass
++
++    def test_dirtype(self):
++        for tarinfo in self.tar:
++            if tarinfo.isdir():
++                self.assert_(tarinfo.name.endswith("/"))
++                self.assert_(not tarinfo.name[:-1].endswith("/"))
++
++    def test_extractall(self):
++        # Test if extractall() correctly restores directory permissions
++        # and times (see issue1735).
++        if sys.platform == "win32":
++            # Win32 has no support for utime() on directories or
++            # fine grained permissions.
++            return
++
++        fobj = StringIO.StringIO()
++        tar = tarfile.open(fileobj=fobj, mode="w:")
++        for name in ("foo", "foo/bar"):
++            tarinfo = tarfile.TarInfo(name)
++            tarinfo.type = tarfile.DIRTYPE
++            tarinfo.mtime = 07606136617
++            tarinfo.mode = 0755
++            tar.addfile(tarinfo)
+         tar.close()
++        fobj.seek(0)
++
++        TEMPDIR = os.path.join(dirname(), "extract-test")
++        tar = tarfile.open(fileobj=fobj)
++        tar.extractall(TEMPDIR)
++        for tarinfo in tar.getmembers():
++            path = os.path.join(TEMPDIR, tarinfo.name)
++            self.assertEqual(tarinfo.mode, os.stat(path).st_mode & 0777)
++            self.assertEqual(tarinfo.mtime, os.path.getmtime(path))
++        tar.close()
++
++    def test_star(self):
++        try:
++            self.tar.getmember("7-STAR")
++        except KeyError:
++            self.fail("finding 7-STAR member failed (mangled prefix?)")
+ 
+-        self.assert_(tarinfo.type == tarfile.DIRTYPE)
+-        self.assert_(tarinfo.name.endswith("/"))
+ 
+ class ReadStreamTest(ReadTest):
+     sep = "|"
+@@ -193,8 +267,65 @@ class ReadStreamTest(ReadTest):
+             self.assert_(v2 is not None, "stream.extractfile() failed")
+             self.assert_(v1.read() == v2.read(), "stream extraction failed")
+ 
++        tar.close()
+         stream.close()
+ 
++class ReadDetectTest(ReadTest):
++
++    def setUp(self):
++        self.tar = tarfile.open(tarname(self.comp), self.mode)
++
++class ReadDetectFileobjTest(ReadTest):
++
++    def setUp(self):
++        name = tarname(self.comp)
++        self.tar = tarfile.open(name, mode=self.mode,
++                                fileobj=open(name, "rb"))
++
++class ReadAsteriskTest(ReadTest):
++
++    def setUp(self):
++        mode = self.mode + self.sep + "*"
++        self.tar = tarfile.open(tarname(self.comp), mode)
++
++class ReadStreamAsteriskTest(ReadStreamTest):
++
++    def setUp(self):
++        mode = self.mode + self.sep + "*"
++        self.tar = tarfile.open(tarname(self.comp), mode)
++
++class ReadFileobjTest(BaseTest):
++
++    def test_fileobj_with_offset(self):
++        # Skip the first member and store values from the second member
++        # of the testtar.
++        self.tar.next()
++        t = self.tar.next()
++        name = t.name
++        offset = t.offset
++        data = self.tar.extractfile(t).read()
++        self.tar.close()
++
++        # Open the testtar and seek to the offset of the second member.
++        if self.comp == "gz":
++            _open = gzip.GzipFile
++        elif self.comp == "bz2":
++            _open = bz2.BZ2File
++        else:
++            _open = open
++        fobj = _open(tarname(self.comp), "rb")
++        fobj.seek(offset)
++
++        # Test if the tarfile starts with the second member.
++        self.tar = tarfile.open(tarname(self.comp), "r:", fileobj=fobj)
++        t = self.tar.next()
++        self.assertEqual(t.name, name)
++        # Read to the end of fileobj and test if seeking back to the
++        # beginning works.
++        self.tar.getmembers()
++        self.assertEqual(self.tar.extractfile(t).read(), data,
++                "seek back did not work")
++
+ class WriteTest(BaseTest):
+     mode = 'w'
+ 
+@@ -226,12 +357,52 @@ class WriteTest(BaseTest):
+             if not tarinfo.isreg():
+                 continue
+             f = self.src.extractfile(tarinfo)
+-            if self.dst.posix and len(tarinfo.name) > tarfile.LENGTH_NAME:
++            if self.dst.posix and len(tarinfo.name) > tarfile.LENGTH_NAME and "/" not in tarinfo.name:
+                 self.assertRaises(ValueError, self.dst.addfile,
+                                  tarinfo, f)
+             else:
+                 self.dst.addfile(tarinfo, f)
+ 
++    def test_add_self(self):
++        dstname = os.path.abspath(self.dstname)
++
++        self.assertEqual(self.dst.name, dstname, "archive name must be absolute")
++
++        self.dst.add(dstname)
++        self.assertEqual(self.dst.getnames(), [], "added the archive to itself")
++
++        cwd = os.getcwd()
++        os.chdir(dirname())
++        self.dst.add(dstname)
++        os.chdir(cwd)
++        self.assertEqual(self.dst.getnames(), [], "added the archive to itself")
++
++
++class Write100Test(BaseTest):
++    # The name field in a tar header stores strings of at most 100 chars.
++    # If a string is shorter than 100 chars it has to be padded with '\0',
++    # which implies that a string of exactly 100 chars is stored without
++    # a trailing '\0'.
++
++    def setUp(self):
++        self.name = "01234567890123456789012345678901234567890123456789"
++        self.name += "01234567890123456789012345678901234567890123456789"
++
++        self.tar = tarfile.open(tmpname(), "w")
++        t = tarfile.TarInfo(self.name)
++        self.tar.addfile(t)
++        self.tar.close()
++
++        self.tar = tarfile.open(tmpname())
++
++    def tearDown(self):
++        self.tar.close()
++
++    def test(self):
++        self.assertEqual(self.tar.getnames()[0], self.name,
++                "failed to store 100 char filename")
++
++
+ class WriteSize0Test(BaseTest):
+     mode = 'w'
+ 
+@@ -245,15 +416,22 @@ class WriteSize0Test(BaseTest):
+ 
+     def test_file(self):
+         path = os.path.join(self.tmpdir, "file")
+-        file(path, "w")
++        f = open(path, "w")
++        f.close()
+         tarinfo = self.dst.gettarinfo(path)
+         self.assertEqual(tarinfo.size, 0)
+-        file(path, "w").write("aaa")
++        f = open(path, "w")
++        f.write("aaa")
++        f.close()
+         tarinfo = self.dst.gettarinfo(path)
+         self.assertEqual(tarinfo.size, 3)
+ 
+     def test_directory(self):
+         path = os.path.join(self.tmpdir, "directory")
++        if os.path.exists(path):
++            # This shouldn't be necessary, but is <wink> if a previous
++            # run was killed in mid-stream.
++            shutil.rmtree(path)
+         os.mkdir(path)
+         tarinfo = self.dst.gettarinfo(path)
+         self.assertEqual(tarinfo.size, 0)
+@@ -269,6 +447,27 @@ class WriteSize0Test(BaseTest):
+ class WriteStreamTest(WriteTest):
+     sep = '|'
+ 
++    def test_padding(self):
++        self.dst.close()
++
++        if self.comp == "gz":
++            f = gzip.GzipFile(self.dstname)
++            s = f.read()
++            f.close()
++        elif self.comp == "bz2":
++            f = bz2.BZ2Decompressor()
++            s = file(self.dstname).read()
++            s = f.decompress(s)
++            self.assertEqual(len(f.unused_data), 0, "trailing data")
++        else:
++            f = file(self.dstname)
++            s = f.read()
++            f.close()
++
++        self.assertEqual(s.count("\0"), tarfile.RECORDSIZE,
++                         "incorrect zero padding")
++
++
+ class WriteGNULongTest(unittest.TestCase):
+     """This testcase checks for correct creation of GNU Longname
+        and Longlink extensions.
+@@ -286,13 +485,6 @@ class WriteGNULongTest(unittest.TestCase
+        is tested as well.
+     """
+ 
+-    def setUp(self):
+-        self.tar = tarfile.open(tmpname(), "w")
+-        self.tar.posix = False
+-
+-    def tearDown(self):
+-        self.tar.close()
+-
+     def _length(self, s):
+         blocks, remainder = divmod(len(s) + 1, 512)
+         if remainder:
+@@ -321,12 +513,23 @@ class WriteGNULongTest(unittest.TestCase
+             tarinfo.linkname = link
+             tarinfo.type = tarfile.LNKTYPE
+ 
+-        self.tar.addfile(tarinfo)
++        tar = tarfile.open(tmpname(), "w")
++        tar.posix = False
++        tar.addfile(tarinfo)
+ 
+         v1 = self._calc_size(name, link)
+-        v2 = self.tar.offset
++        v2 = tar.offset
+         self.assertEqual(v1, v2, "GNU longname/longlink creation failed")
+ 
++        tar.close()
++
++        tar = tarfile.open(tmpname())
++        member = tar.next()
++        self.failIf(member is None, "unable to read longname member")
++        self.assert_(tarinfo.name == member.name and \
++                     tarinfo.linkname == member.linkname, \
++                     "unable to read longname member")
++
+     def test_longname_1023(self):
+         self._test(("longnam/" * 127) + "longnam")
+ 
+@@ -357,6 +560,52 @@ class WriteGNULongTest(unittest.TestCase
+         self._test(("longnam/" * 127) + "longname_",
+                    ("longlnk/" * 127) + "longlink_")
+ 
++class ReadGNULongTest(unittest.TestCase):
++
++    def setUp(self):
++        self.tar = tarfile.open(tarname())
++
++    def tearDown(self):
++        self.tar.close()
++
++    def test_1471427(self):
++        """Test reading of longname (bug #1471427).
++        """
++        name = "test/" * 20 + "0-REGTYPE"
++        try:
++            tarinfo = self.tar.getmember(name)
++        except KeyError:
++            tarinfo = None
++        self.assert_(tarinfo is not None, "longname not found")
++        self.assert_(tarinfo.type != tarfile.DIRTYPE, "read longname as dirtype")
++
++    def test_read_name(self):
++        name = ("0-LONGNAME-" * 10)[:101]
++        try:
++            tarinfo = self.tar.getmember(name)
++        except KeyError:
++            tarinfo = None
++        self.assert_(tarinfo is not None, "longname not found")
++
++    def test_read_link(self):
++        link = ("1-LONGLINK-" * 10)[:101]
++        name = ("0-LONGNAME-" * 10)[:101]
++        try:
++            tarinfo = self.tar.getmember(link)
++        except KeyError:
++            tarinfo = None
++        self.assert_(tarinfo is not None, "longlink not found")
++        self.assert_(tarinfo.linkname == name, "linkname wrong")
++
++    def test_truncated_longname(self):
++        f = open(tarname())
++        fobj = StringIO.StringIO(f.read(1024))
++        f.close()
++        tar = tarfile.open(name="foo.tar", fileobj=fobj)
++        self.assert_(len(tar.getmembers()) == 0, "")
++        tar.close()
++
++
+ class ExtractHardlinkTest(BaseTest):
+ 
+     def test_hardlink(self):
+@@ -392,7 +641,9 @@ class CreateHardlinkTest(BaseTest):
+         if os.path.exists(self.bar):
+             os.remove(self.bar)
+ 
+-        file(self.foo, "w").write("foo")
++        f = open(self.foo, "w")
++        f.write("foo")
++        f.close()
+         self.tar.add(self.foo)
+ 
+     def test_add_twice(self):
+@@ -431,6 +682,16 @@ class WriteTestGzip(WriteTest):
+     comp = "gz"
+ class WriteStreamTestGzip(WriteStreamTest):
+     comp = "gz"
++class ReadDetectTestGzip(ReadDetectTest):
++    comp = "gz"
++class ReadDetectFileobjTestGzip(ReadDetectFileobjTest):
++    comp = "gz"
++class ReadAsteriskTestGzip(ReadAsteriskTest):
++    comp = "gz"
++class ReadStreamAsteriskTestGzip(ReadStreamAsteriskTest):
++    comp = "gz"
++class ReadFileobjTestGzip(ReadFileobjTest):
++    comp = "gz"
+ 
+ # Filemode test cases
+ 
+@@ -439,6 +700,35 @@ class FileModeTest(unittest.TestCase):
+         self.assertEqual(tarfile.filemode(0755), '-rwxr-xr-x')
+         self.assertEqual(tarfile.filemode(07111), '---s--s--t')
+ 
++class OpenFileobjTest(BaseTest):
++
++    def test_opener(self):
++        # Test for SF bug #1496501.
++        fobj = StringIO.StringIO("foo\n")
++        try:
++            tarfile.open("", mode="r", fileobj=fobj)
++        except tarfile.ReadError:
++            self.assertEqual(fobj.tell(), 0, "fileobj's position has moved")
++
++    def test_no_name_argument(self):
++        fobj = open(testtar, "rb")
++        tar = tarfile.open(fileobj=fobj, mode="r")
++        self.assertEqual(tar.name, os.path.abspath(fobj.name))
++
++    def test_no_name_attribute(self):
++        data = open(testtar, "rb").read()
++        fobj = StringIO.StringIO(data)
++        self.assertRaises(AttributeError, getattr, fobj, "name")
++        tar = tarfile.open(fileobj=fobj, mode="r")
++        self.assertEqual(tar.name, None)
++
++    def test_empty_name_attribute(self):
++        data = open(testtar, "rb").read()
++        fobj = StringIO.StringIO(data)
++        fobj.name = ""
++        tar = tarfile.open(fileobj=fobj, mode="r")
++        self.assertEqual(tar.name, None)
++
+ 
+ if bz2:
+     # Bzip2 TestCases
+@@ -450,6 +740,39 @@ if bz2:
+         comp = "bz2"
+     class WriteStreamTestBzip2(WriteStreamTestGzip):
+         comp = "bz2"
++    class ReadDetectTestBzip2(ReadDetectTest):
++        comp = "bz2"
++    class ReadDetectFileobjTestBzip2(ReadDetectFileobjTest):
++        comp = "bz2"
++    class ReadAsteriskTestBzip2(ReadAsteriskTest):
++        comp = "bz2"
++    class ReadStreamAsteriskTestBzip2(ReadStreamAsteriskTest):
++        comp = "bz2"
++    class ReadFileobjTestBzip2(ReadFileobjTest):
++        comp = "bz2"
++
++    class PartialReadTestBzip2(unittest.TestCase):
++        # Issue5068: The _BZ2Proxy.read() method loops forever
++        # on an empty or partial bzipped file.
++
++        def _test_partial_input(self, mode):
++            class MyStringIO(StringIO.StringIO):
++                hit_eof = False
++                def read(self, n):
++                    if self.hit_eof:
++                        raise AssertionError("infinite loop detected in tarfile.open()")
++                    self.hit_eof = self.pos == self.len
++                    return StringIO.StringIO.read(self, n)
++
++            data = bz2.compress(tarfile.TarInfo("foo").tobuf())
++            for x in range(len(data) + 1):
++                tarfile.open(fileobj=MyStringIO(data[:x]), mode=mode)
++
++        def test_partial_input(self):
++            self._test_partial_input("r")
++
++        def test_partial_input_bz2(self):
++            self._test_partial_input("r:bz2")
+ 
+ # If importing gzip failed, discard the Gzip TestCases.
+ if not gzip:
+@@ -459,21 +782,37 @@ if not gzip:
+     del WriteStreamTestGzip
+ 
+ def test_main():
++    # Create archive.
++    f = open(tarname(), "rb")
++    fguts = f.read()
++    f.close()
+     if gzip:
+         # create testtar.tar.gz
+-        gzip.open(tarname("gz"), "wb").write(file(tarname(), "rb").read())
++        tar = gzip.open(tarname("gz"), "wb")
++        tar.write(fguts)
++        tar.close()
+     if bz2:
+         # create testtar.tar.bz2
+-        bz2.BZ2File(tarname("bz2"), "wb").write(file(tarname(), "rb").read())
++        tar = bz2.BZ2File(tarname("bz2"), "wb")
++        tar.write(fguts)
++        tar.close()
+ 
+     tests = [
+         FileModeTest,
++        OpenFileobjTest,
+         ReadTest,
+         ReadStreamTest,
++        ReadDetectTest,
++        ReadDetectFileobjTest,
++        ReadAsteriskTest,
++        ReadStreamAsteriskTest,
++        ReadFileobjTest,
+         WriteTest,
++        Write100Test,
+         WriteSize0Test,
+         WriteStreamTest,
+         WriteGNULongTest,
++        ReadGNULongTest,
+     ]
+ 
+     if hasattr(os, "link"):
+@@ -483,13 +822,19 @@ def test_main():
+     if gzip:
+         tests.extend([
+             ReadTestGzip, ReadStreamTestGzip,
+-            WriteTestGzip, WriteStreamTestGzip
++            WriteTestGzip, WriteStreamTestGzip,
++            ReadDetectTestGzip, ReadDetectFileobjTestGzip,
++            ReadAsteriskTestGzip, ReadStreamAsteriskTestGzip,
++            ReadFileobjTestGzip
+         ])
+ 
+     if bz2:
+         tests.extend([
+             ReadTestBzip2, ReadStreamTestBzip2,
+-            WriteTestBzip2, WriteStreamTestBzip2
++            WriteTestBzip2, WriteStreamTestBzip2,
++            ReadDetectTestBzip2, ReadDetectFileobjTestBzip2,
++            ReadAsteriskTestBzip2, ReadStreamAsteriskTestBzip2,
++            ReadFileobjTestBzip2, PartialReadTestBzip2
+         ])
+     try:
+         test_support.run_unittest(*tests)

@@ -1,0 +1,31 @@
+diff -rup Python-2.4.3-orig/Lib/urllib2.py Python-2.4.3/Lib/urllib2.py
+--- Python-2.4.3-orig/Lib/urllib2.py	2006-03-23 14:07:46.000000000 -0500
++++ Python-2.4.3/Lib/urllib2.py	2008-09-04 20:03:37.000000000 -0400
+@@ -929,6 +929,16 @@ class ProxyDigestAuthHandler(BaseHandler
+         self.reset_retry_count()
+         return retry
+ 
++class _WrapForRecv:
++    """ Simple wrapper for urllib2 so we don't have to do r.read = r.recv and
++        create circular refs. """
++    def __init__(self, obj):
++        self.__obj = obj
++
++    def __getattr__(self, name):
++        if name == "recv": name = "read"
++        return getattr(self.__obj, name)
++
+ class AbstractHTTPHandler(BaseHandler):
+ 
+     def __init__(self, debuglevel=0):
+@@ -1006,7 +1016,8 @@ class AbstractHTTPHandler(BaseHandler):
+         # XXX It might be better to extract the read buffering code
+         # out of socket._fileobject() and into a base class.
+ 
+-        r.recv = r.read
++        # r.recv = r.read
++        r = _WrapForRecv(r)
+         fp = socket._fileobject(r)
+ 
+         resp = addinfourl(fp, r.msg, req.get_full_url())
+Only in Python-2.4.3/Lib: urllib2.py~

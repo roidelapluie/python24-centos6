@@ -1,0 +1,333 @@
+diff -up Python-2.4.3/Include/floatobject.h.add-debug-malloc-stats Python-2.4.3/Include/floatobject.h
+--- Python-2.4.3/Include/floatobject.h.add-debug-malloc-stats	2003-03-20 15:53:32.000000000 -0500
++++ Python-2.4.3/Include/floatobject.h	2010-11-15 14:57:25.000000000 -0500
+@@ -88,6 +88,7 @@ PyAPI_FUNC(int) _PyFloat_Pack8(double x,
+ PyAPI_FUNC(double) _PyFloat_Unpack4(const unsigned char *p, int le);
+ PyAPI_FUNC(double) _PyFloat_Unpack8(const unsigned char *p, int le);
+ 
++PyAPI_FUNC(void) _PyFloat_DebugMallocStats(void);
+ 
+ #ifdef __cplusplus
+ }
+diff -up Python-2.4.3/Include/intobject.h.add-debug-malloc-stats Python-2.4.3/Include/intobject.h
+--- Python-2.4.3/Include/intobject.h.add-debug-malloc-stats	2004-10-28 12:32:00.000000000 -0400
++++ Python-2.4.3/Include/intobject.h	2010-11-15 14:57:25.000000000 -0500
+@@ -55,6 +55,8 @@ PyAPI_FUNC(long) PyInt_GetMax(void);
+ PyAPI_FUNC(unsigned long) PyOS_strtoul(char *, char **, int);
+ PyAPI_FUNC(long) PyOS_strtol(char *, char **, int);
+ 
++PyAPI_FUNC(void) _PyInt_DebugMallocStats(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -up Python-2.4.3/Include/object.h.add-debug-malloc-stats Python-2.4.3/Include/object.h
+--- Python-2.4.3/Include/object.h.add-debug-malloc-stats	2004-09-22 22:39:37.000000000 -0400
++++ Python-2.4.3/Include/object.h	2010-11-15 14:57:25.000000000 -0500
+@@ -801,6 +801,12 @@ PyAPI_DATA(PyObject *) _PyTrash_delete_l
+ 	else \
+ 		_PyTrash_deposit_object((PyObject*)op);
+ 
++PyAPI_FUNC(void)
++_PyDebugAllocatorStats(const char *block_name, int num_blocks, size_t sizeof_block);
++
++PyAPI_FUNC(void)
++_PyObject_DebugTypeStats(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -up Python-2.4.3/Include/objimpl.h.add-debug-malloc-stats Python-2.4.3/Include/objimpl.h
+--- Python-2.4.3/Include/objimpl.h.add-debug-malloc-stats	2006-01-26 13:49:57.000000000 -0500
++++ Python-2.4.3/Include/objimpl.h	2010-11-15 14:57:25.000000000 -0500
+@@ -101,13 +101,13 @@ PyAPI_FUNC(void) PyObject_Free(void *);
+ 
+ /* Macros */
+ #ifdef WITH_PYMALLOC
++PyAPI_FUNC(void) _PyObject_DebugMallocStats(void);
+ #ifdef PYMALLOC_DEBUG
+ PyAPI_FUNC(void *) _PyObject_DebugMalloc(size_t nbytes);
+ PyAPI_FUNC(void *) _PyObject_DebugRealloc(void *p, size_t nbytes);
+ PyAPI_FUNC(void) _PyObject_DebugFree(void *p);
+ PyAPI_FUNC(void) _PyObject_DebugDumpAddress(const void *p);
+ PyAPI_FUNC(void) _PyObject_DebugCheckAddress(const void *p);
+-PyAPI_FUNC(void) _PyObject_DebugMallocStats(void);
+ #define PyObject_MALLOC		_PyObject_DebugMalloc
+ #define PyObject_Malloc		_PyObject_DebugMalloc
+ #define PyObject_REALLOC	_PyObject_DebugRealloc
+diff -up Python-2.4.3/Include/Python.h.add-debug-malloc-stats Python-2.4.3/Include/Python.h
+diff -up Python-2.4.3/Include/stringobject.h.add-debug-malloc-stats Python-2.4.3/Include/stringobject.h
+--- Python-2.4.3/Include/stringobject.h.add-debug-malloc-stats	2004-10-28 12:32:00.000000000 -0400
++++ Python-2.4.3/Include/stringobject.h	2010-11-15 14:57:25.000000000 -0500
+@@ -177,6 +177,8 @@ PyAPI_FUNC(int) PyString_AsStringAndSize
+     );
+     
+ 
++PyAPI_FUNC(void) _PyString_DebugMallocStats(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -up Python-2.4.3/Include/unicodeobject.h.add-debug-malloc-stats Python-2.4.3/Include/unicodeobject.h
+--- Python-2.4.3/Include/unicodeobject.h.add-debug-malloc-stats	2005-08-30 06:46:06.000000000 -0400
++++ Python-2.4.3/Include/unicodeobject.h	2010-11-15 14:57:25.000000000 -0500
+@@ -1199,6 +1199,8 @@ PyAPI_FUNC(int) _PyUnicode_IsAlpha(
+     Py_UNICODE ch 	/* Unicode character */
+     );
+ 
++PyAPI_FUNC(void) _PyUnicode_DebugMallocStats(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -up Python-2.4.3/Objects/floatobject.c.add-debug-malloc-stats Python-2.4.3/Objects/floatobject.c
+--- Python-2.4.3/Objects/floatobject.c.add-debug-malloc-stats	2004-09-23 15:22:41.000000000 -0400
++++ Python-2.4.3/Objects/floatobject.c	2010-11-15 14:57:25.000000000 -0500
+@@ -28,6 +28,21 @@ typedef struct _floatblock PyFloatBlock;
+ static PyFloatBlock *block_list = NULL;
+ static PyFloatObject *free_list = NULL;
+ 
++/* Print summary info to stderr about the state of the optimized allocator */
++void
++_PyFloat_DebugMallocStats(void)
++{
++	int num_blocks = 0;
++	PyFloatBlock *block;
++
++	/* Walk the block list, counting */
++	for (block = block_list; block ; block = block->next) {
++		num_blocks++;
++	}
++
++	_PyDebugAllocatorStats("PyFloatBlock", num_blocks, sizeof(PyFloatBlock));
++}
++
+ static PyFloatObject *
+ fill_free_list(void)
+ {
+diff -up Python-2.4.3/Objects/intobject.c.add-debug-malloc-stats Python-2.4.3/Objects/intobject.c
+--- Python-2.4.3/Objects/intobject.c.add-debug-malloc-stats	2004-08-24 22:14:08.000000000 -0400
++++ Python-2.4.3/Objects/intobject.c	2010-11-15 14:57:25.000000000 -0500
+@@ -41,6 +41,22 @@ typedef struct _intblock PyIntBlock;
+ static PyIntBlock *block_list = NULL;
+ static PyIntObject *free_list = NULL;
+ 
++
++/* Print summary info to stderr about the state of the optimized allocator */
++void
++_PyInt_DebugMallocStats(void)
++{
++	int num_blocks = 0;
++	PyIntBlock *block;
++
++	/* Walk the block list, counting */
++	for (block = block_list; block ; block = block->next) {
++		num_blocks++;
++	}
++
++	_PyDebugAllocatorStats("PyIntBlock", num_blocks, sizeof(PyIntBlock));
++}
++
+ static PyIntObject *
+ fill_free_list(void)
+ {
+diff -up Python-2.4.3/Objects/object.c.add-debug-malloc-stats Python-2.4.3/Objects/object.c
+--- Python-2.4.3/Objects/object.c.add-debug-malloc-stats	2006-03-14 01:10:22.000000000 -0500
++++ Python-2.4.3/Objects/object.c	2010-11-15 14:57:25.000000000 -0500
+@@ -1960,6 +1960,14 @@ PyMem_Free(void *p)
+ 	PyMem_FREE(p);
+ }
+ 
++void
++_PyObject_DebugTypeStats(void)
++{
++	_PyInt_DebugMallocStats();
++	_PyFloat_DebugMallocStats();
++	_PyString_DebugMallocStats();
++	_PyUnicode_DebugMallocStats();
++}
+ 
+ /* These methods are used to control infinite recursion in repr, str, print,
+    etc.  Container objects that may recursively contain themselves,
+diff -up Python-2.4.3/Objects/obmalloc.c.add-debug-malloc-stats Python-2.4.3/Objects/obmalloc.c
+--- Python-2.4.3/Objects/obmalloc.c.add-debug-malloc-stats	2010-11-15 14:57:25.000000000 -0500
++++ Python-2.4.3/Objects/obmalloc.c	2010-11-15 15:00:36.000000000 -0500
+@@ -493,12 +493,10 @@ static struct arena_object* usable_arena
+ /* Number of arenas allocated that haven't been free()'d. */
+ static ulong narenas_currently_allocated = 0;
+ 
+-#ifdef PYMALLOC_DEBUG
+ /* Total number of times malloc() called to allocate an arena. */
+ static ulong ntimes_arena_allocated = 0;
+ /* High water mark (max value ever seen) for narenas_currently_allocated. */
+ static ulong narenas_highwater = 0;
+-#endif
+ 
+ /* Allocate a new arena.  If we run out of memory, return NULL.  Else
+  * allocate a new arena, and return the address of an arena_object
+@@ -571,11 +569,9 @@ new_arena(void)
+ 	}
+ 
+ 	++narenas_currently_allocated;
+-#ifdef PYMALLOC_DEBUG
+ 	++ntimes_arena_allocated;
+ 	if (narenas_currently_allocated > narenas_highwater)
+ 		narenas_highwater = narenas_currently_allocated;
+-#endif
+ 	arenaobj->freepools = NULL;
+ 	/* pool_address <- first pool-aligned address in the arena
+ 	   nfreepools <- number of whole pools that fit after alignment */
+@@ -1554,6 +1550,9 @@ _PyObject_DebugDumpAddress(const void *p
+ 	}
+ }
+ 
++#endif /* PYMALLOC_DEBUG */
++
++
+ static ulong
+ printone(const char* msg, ulong value)
+ {
+@@ -1590,6 +1589,16 @@ printone(const char* msg, ulong value)
+ 	return origvalue;
+ }
+ 
++void
++_PyDebugAllocatorStats(const char *block_name, int num_blocks, size_t sizeof_block)
++{
++	char buf[128];
++	PyOS_snprintf(buf, sizeof(buf),
++		      "%d %ss * %d bytes each",
++		      num_blocks, block_name, sizeof_block);
++	(void)printone(buf, num_blocks * sizeof_block);
++}
++
+ /* Print summary info to stderr about the state of pymalloc's structures.
+  * In Py_DEBUG mode, also perform some expensive internal consistency
+  * checks.
+@@ -1665,7 +1674,9 @@ _PyObject_DebugMallocStats(void)
+ 
+ 			if (p->ref.count == 0) {
+ 				/* currently unused */
++#ifdef Py_DEBUG
+ 				assert(pool_is_in_list(p, arenas[i].freepools));
++#endif
+ 				continue;
+ 			}
+ 			++numpools[sz];
+@@ -1702,7 +1713,9 @@ _PyObject_DebugMallocStats(void)
+ 		quantization += p * ((POOL_SIZE - POOL_OVERHEAD) % size);
+ 	}
+ 	fputc('\n', stderr);
++#ifdef PYMALLOC_DEBUG
+ 	(void)printone("# times object malloc called", serialno);
++#endif
+ 
+ 	(void)printone("# arenas allocated total", ntimes_arena_allocated);
+ 	(void)printone("# arenas reclaimed", ntimes_arena_allocated - narenas);
+@@ -1728,8 +1741,6 @@ _PyObject_DebugMallocStats(void)
+ 	(void)printone("Total", total);
+ }
+ 
+-#endif	/* PYMALLOC_DEBUG */
+-
+ #ifdef Py_USING_MEMORY_DEBUGGER
+ /* Make this function last so gcc won't inline it since the definition is
+  * after the reference.
+diff -up Python-2.4.3/Objects/stringobject.c.add-debug-malloc-stats Python-2.4.3/Objects/stringobject.c
+--- Python-2.4.3/Objects/stringobject.c.add-debug-malloc-stats	2010-11-15 14:57:25.000000000 -0500
++++ Python-2.4.3/Objects/stringobject.c	2010-11-15 14:57:25.000000000 -0500
+@@ -4467,3 +4467,43 @@ void _Py_ReleaseInternedStrings(void)
+ 	Py_DECREF(interned);
+ 	interned = NULL;
+ }
++
++void _PyString_DebugMallocStats(void)
++{
++	ssize_t i;
++	int num_immortal = 0, num_mortal = 0;
++	ssize_t immortal_size = 0, mortal_size = 0;
++
++	if (interned == NULL || !PyDict_Check(interned))
++		return;
++
++	for (i = 0; i <= ((PyDictObject*)interned)->ma_mask; i++) {
++		PyDictEntry *ep = ((PyDictObject*)interned)->ma_table + i;
++		PyObject *pvalue = ep->me_value;
++		if (pvalue != NULL) {
++			PyStringObject *s = (PyStringObject *)ep->me_key;
++			
++			switch (s->ob_sstate) {
++			case SSTATE_NOT_INTERNED:
++				/* XXX Shouldn't happen */
++				break;
++			case SSTATE_INTERNED_IMMORTAL:
++				num_immortal ++;
++				immortal_size += s->ob_size;
++				break;
++			case SSTATE_INTERNED_MORTAL:
++				num_mortal ++;
++				mortal_size += s->ob_size;
++				break;
++			default:
++				Py_FatalError("Inconsistent interned string state.");
++			}
++		}
++	}
++
++	fprintf(stderr, "%d mortal interned strings\n", num_mortal);
++	fprintf(stderr, "%d immortal interned strings\n", num_immortal);
++	fprintf(stderr, "total size of all interned strings: "
++			"%d/%d "
++			"mortal/immortal\n", mortal_size, immortal_size);
++}
+diff -up Python-2.4.3/Objects/unicodeobject.c.add-debug-malloc-stats Python-2.4.3/Objects/unicodeobject.c
+--- Python-2.4.3/Objects/unicodeobject.c.add-debug-malloc-stats	2010-11-15 14:57:25.000000000 -0500
++++ Python-2.4.3/Objects/unicodeobject.c	2010-11-15 14:57:25.000000000 -0500
+@@ -7429,6 +7429,11 @@ _PyUnicode_Fini(void)
+     unicode_freelist_size = 0;
+ }
+ 
++void _PyUnicode_DebugMallocStats(void)
++{
++	_PyDebugAllocatorStats("free PyUnicodeObject", unicode_freelist_size, sizeof(PyUnicodeObject));
++}
++
+ /*
+ Local variables:
+ c-basic-offset: 4
+diff -up Python-2.4.3/Python/sysmodule.c.add-debug-malloc-stats Python-2.4.3/Python/sysmodule.c
+--- Python-2.4.3/Python/sysmodule.c.add-debug-malloc-stats	2010-11-15 14:57:25.000000000 -0500
++++ Python-2.4.3/Python/sysmodule.c	2010-11-15 14:57:25.000000000 -0500
+@@ -701,6 +701,24 @@ a 11-tuple where the entries in the tupl
+ 10. Number of stack pops performed by call_function()"
+ );
+ 
++static PyObject *
++sys_debugmallocstats(PyObject *self, PyObject *args)
++{
++	_PyObject_DebugMallocStats();
++	fputc('\n', stderr);
++        _PyObject_DebugTypeStats();
++
++	Py_RETURN_NONE;
++}
++PyDoc_STRVAR(debugmallocstats_doc,
++"_debugmallocstats()\n\
++\n\
++Print summary info to stderr about the state of pymalloc's structures.\n\
++\n\
++In Py_DEBUG mode, also perform some expensive internal consistency\n\
++checks.\n\
++");
++
+ #ifdef Py_TRACE_REFS
+ /* Defined in objects.c because it uses static globals if that file */
+ extern PyObject *_Py_GetObjects(PyObject *, PyObject *);
+@@ -775,6 +793,7 @@ static PyMethodDef sys_methods[] = {
+ #endif
+ 	{"settrace",	sys_settrace, METH_O, settrace_doc},
+ 	{"call_tracing", sys_call_tracing, METH_VARARGS, call_tracing_doc},
++	{"_debugmallocstats", sys_debugmallocstats, METH_NOARGS, debugmallocstats_doc},
+ 	{NULL,		NULL}		/* sentinel */
+ };
+ 

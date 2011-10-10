@@ -1,0 +1,11 @@
+diff -up Python-2.4.3/Lib/urllib2.py.urllib2-allow-proxy-bypass-for-all-schemes Python-2.4.3/Lib/urllib2.py
+--- Python-2.4.3/Lib/urllib2.py.urllib2-allow-proxy-bypass-for-all-schemes	2010-12-10 16:50:41.000000000 -0500
++++ Python-2.4.3/Lib/urllib2.py	2010-12-10 16:21:13.000000000 -0500
+@@ -652,6 +652,7 @@ class ProxyHandler(BaseHandler):
+         proxy_type, user, password, hostport = _parse_proxy(proxy)
+         if proxy_type is None:
+             proxy_type = orig_type
++        req.get_host()
+         if req.host and proxy_bypass(req.host):
+             return None
+         if user and password:

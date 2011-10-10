@@ -1,0 +1,11 @@
+--- python/trunk/Objects/genobject.c    2005/08/02 00:46:46 39239
++++ python/trunk/Objects/genobject.c    2005/08/13 03:29:00 39279
+@@ -82,7 +82,7 @@
+	/* Don't keep the reference to f_back any longer than necessary.  It
+	 * may keep a chain of frames alive or it could create a reference
+	 * cycle. */
+-	assert(f->f_back != NULL);
++	assert(f->f_back == tstate->frame);
+	Py_CLEAR(f->f_back);
+
+	/* If the generator just returned (as opposed to yielding), signal

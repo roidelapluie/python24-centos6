@@ -1,0 +1,22 @@
+Index: Lib/httplib.py
+===================================================================
+RCS file: /cvsroot/python/python/dist/src/Lib/httplib.py,v
+retrieving revision 1.95
+diff -u -p -r1.95 httplib.py
+--- Lib/httplib.py	26 Jun 2005 22:06:54 -0000	1.95
++++ Lib/httplib.py	18 Jul 2005 19:33:37 -0000
+@@ -493,7 +493,13 @@ class HTTPResponse:
+                 i = line.find(';')
+                 if i >= 0:
+                     line = line[:i] # strip chunk-extensions
+-                chunk_left = int(line, 16)
++                try:
++                    chunk_left = int(line, 16)
++                except ValueError:
++                    # the chunked encoding somehow got messed up
++                    # return what we got so far and ignore the rest
++                    self.close()
++                    return value
+                 if chunk_left == 0:
+                     break
+             if amt is None:

@@ -1,0 +1,48 @@
+diff --git a/Lib/email/Message.py b/Lib/email/Message.py
+index a5a8ff2..bee6558 100644
+--- a/Lib/email/Message.py
++++ b/Lib/email/Message.py
+@@ -711,7 +711,7 @@ class Message:
+         missing = object()
+         filename = self.get_param('filename', missing, 'content-disposition')
+         if filename is missing:
+-            filename = self.get_param('name', missing, 'content-disposition')
++            filename = self.get_param('name', missing, 'content-type')
+         if filename is missing:
+             return failobj
+         return Utils.collapse_rfc2231_value(filename).strip()
+diff --git a/Lib/email/test/data/msg_44.txt b/Lib/email/test/data/msg_44.txt
+index ae462a6..15a2252 100644
+--- a/Lib/email/test/data/msg_44.txt
++++ b/Lib/email/test/data/msg_44.txt
+@@ -16,16 +16,14 @@ X-Oblique-Strategy: Make a door into a window
+ 
+ 
+ --h90VIIIKmx
+-Content-Type: text/plain
+-Content-Disposition: inline; name="msg.txt"
++Content-Type: text/plain; name="msg.txt"
+ Content-Transfer-Encoding: 7bit
+ 
+ a simple kind of mirror
+ to reflect upon our own
+ 
+ --h90VIIIKmx
+-Content-Type: text/plain
+-Content-Disposition: inline; name="msg.txt"
++Content-Type: text/plain; name="msg.txt"
+ Content-Transfer-Encoding: 7bit
+ 
+ a simple kind of mirror
+diff --git a/Misc/ACKS b/Misc/ACKS
+index 350c5ea..1ada7ab 100644
+--- a/Misc/ACKS
++++ b/Misc/ACKS
+@@ -647,6 +647,7 @@ Stefan Witzel
+ Klaus-Juergen Wolf
+ Dan Wolfe
+ Richard Wolff
++Darren Worrall
+ Gordon Worley
+ Thomas Wouters
+ Doug Wyatt

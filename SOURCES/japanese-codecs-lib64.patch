@@ -1,0 +1,18 @@
+--- JapaneseCodecs-1.4.11/setup.py.lib64-j	Mon Feb 10 12:44:55 2003
++++ JapaneseCodecs-1.4.11/setup.py	Mon Feb 10 12:45:26 2003
+@@ -25,12 +25,12 @@
+ import os, sys
+ 
+ if os.sep == '/':
+-    sitedir = os.path.join("lib", "python" + sys.version[:3], "site-packages")
++    sitedir = os.path.join("lib64", "python" + sys.version[:3], "site-packages")
+ elif os.sep == ':':
+-    sitedir = os.path.join("lib", "site-packages")
++    sitedir = os.path.join("lib64", "site-packages")
+ else:
+     if sys.version_info[0:3] >= (2, 2, 0):
+-        sitedir = os.path.join("lib", "site-packages")
++        sitedir = os.path.join("lib64", "site-packages")
+     else:
+         sitedir = "."
+ 
