@@ -3,15 +3,9 @@
 
 %define _default_patch_fuzz 2
 
-%if "%{__python_ver}" != "EMPTY"
 %define main_python 0
 %define python python%{__python_ver}
 %define tkinter tkinter%{__python_ver}
-%else
-%define main_python 1
-%define python python
-%define tkinter tkinter
-%endif
 
 %define pybasever 2.4
 %define pylibdir %{_libdir}/python%{pybasever}
