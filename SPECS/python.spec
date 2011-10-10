@@ -413,6 +413,10 @@ export CC=gcc
 # configure.in
 autoconf
 
+#remove bsddb
+sed '/^Modules\/_bsddb/d' -i Makefile
+sed 's/ Modules\/_bsddb$(SO)//'  -i Makefile
+
 # Preserve timestamps when installing, to minimize .pyc/.pyo differences
 # across architectures:
 export INSTALL="/usr/bin/install -p -c"
@@ -640,7 +644,6 @@ rm -fr $RPM_BUILD_ROOT
 %endif
 %dir %{dynload_dir}
 %{dynload_dir}/_bisect.so
-%{dynload_dir}/_bsddb.so
 %{dynload_dir}/_codecs_cn.so
 %{dynload_dir}/_codecs_hk.so
 %{dynload_dir}/_codecs_iso2022.so
