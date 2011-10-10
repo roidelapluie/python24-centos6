@@ -1,0 +1,16 @@
+--- a/Modules/_bsddb.c	2006-03-07 15:16:02.000000000 +0100
++++ b/Modules/_bsddb.c	2011-10-10 16:47:53.077510054 +0200
+@@ -5092,8 +5092,13 @@
+     ADD_INT(d, DB_TIME_NOTGRANTED);
+     ADD_INT(d, DB_TXN_NOT_DURABLE);
+     ADD_INT(d, DB_TXN_WRITE_NOSYNC);
++#if (DBVER <= 45)
+     ADD_INT(d, DB_LOG_AUTOREMOVE);
+     ADD_INT(d, DB_DIRECT_LOG);
++#else
++    ADD_INT(d, DB_LOG_AUTO_REMOVE);
++    ADD_INT(d, DB_LOG_DIRECT);
++#endif
+     ADD_INT(d, DB_DIRECT_DB);
+     ADD_INT(d, DB_INIT_REP);
+     ADD_INT(d, DB_ENCRYPT);

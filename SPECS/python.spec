@@ -157,6 +157,9 @@ Patch210: python-2.4.3-CVE-2011-1015.patch
 # http://hg.python.org/cpython/rev/aa30b16d07bc/
 Patch211: python-2.4.3-CVE-2010-3493.patch
 
+Patch212: python-2.4.3-db45.patch
+Patch213: python-2.4.3-db46.patch
+
 
 # The core python package contains just the executable and manpages; most of
 # the content is now in the -libs subpackage.
@@ -365,6 +368,8 @@ cp %{SOURCE8} Lib/test/testtar.tar
 %patch209 -p1
 %patch210 -p1
 %patch211 -p1
+%patch212 -p1
+%patch213 -p1
 
 
 # This shouldn't be necesarry, but is right now (2.2a3)
