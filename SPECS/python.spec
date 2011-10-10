@@ -407,10 +407,6 @@ export CC=gcc
 # configure.in
 autoconf
 
-#remove bsddb
-sed '/^Modules\/_bsddb/d' -i Makefile
-sed 's/ Modules\/_bsddb$(SO)//'  -i Makefile
-
 # Preserve timestamps when installing, to minimize .pyc/.pyo differences
 # across architectures:
 export INSTALL="/usr/bin/install -p -c"
@@ -424,6 +420,10 @@ export INSTALL="/usr/bin/install -p -c"
 %endif
     --with-system-expat \
     %{nil}
+
+#remove bsddb
+sed '/^Modules\/_bsddb/d' -i Makefile
+sed 's/ Modules\/_bsddb$(SO)//'  -i Makefile
 
 make OPT="$CFLAGS" %{?_smp_mflags}
 LD_LIBRARY_PATH=$topdir $topdir/python Tools/scripts/pathfix.py -p -i "%{_bindir}/env python%{pybasever}" .
