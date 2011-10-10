@@ -177,9 +177,9 @@ BuildPrereq: db4-devel >= 4.3
 Provides: %{python}-%{_arch} = %{version}-%{release}
 
 BuildRoot: %{_tmppath}/%{name}-%{version}-root
-BuildPrereq: readline-devel, libtermcap-devel, openssl-devel, gmp-devel
+BuildPrereq: readline-devel, compat-libtermcap, openssl-devel, gmp-devel
 BuildPrereq: ncurses-devel, gdbm-devel, zlib-devel, expat-devel
-BuildPrereq: libGL-devel tk tix gcc-c++ libX11-devel glibc-devel
+BuildPrereq: mesa-libGL-devel tk tix gcc-c++ libX11-devel glibc-devel
 BuildPrereq: bzip2 tar /usr/bin/find pkgconfig tcl-devel tk-devel
 BuildPrereq: tix-devel bzip2-devel
 BuildPrereq: autoconf
