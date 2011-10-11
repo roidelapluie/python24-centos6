@@ -24,7 +24,7 @@
 Summary: An interpreted, interactive, object-oriented programming language.
 Name: %{python}
 Version: %{pybasever}.3
-Release: 44%{?dist}
+Release: JENKINS_BUILD%{?dist}
 License: PSF - see LICENSE
 Group: Development/Languages
 Provides: python-abi = %{pybasever}
@@ -215,7 +215,7 @@ Provides: %{python}-libs-%{_arch} = %{version}-%{release}
 # Ensure that a "yum install python-libs" also updates the "python" package to
 # a compatible version (i.e. to a "python" subpackage from after the
 # python/python-libs split)
-Conflicts: %{python} < 2.4.3-32.el5
+Conflicts: %{python} < 2.4.3-JENKINS_BUILD%{?dist}
 
 # optik is part of python 2.3 as optparse
 Provides: python-optik = 1.4.1
