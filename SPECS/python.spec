@@ -4,8 +4,8 @@
 %define _default_patch_fuzz 2
 
 %define main_python 0
-%define python python%{__python_ver}
-%define tkinter tkinter%{__python_ver}
+%define python python24
+%define tkinter tkinter24
 
 %define pybasever 2.4
 %define pylibdir %{_libdir}/python%{pybasever}
@@ -421,7 +421,7 @@ export INSTALL="/usr/bin/install -p -c"
     --with-system-expat \
     %{nil}
 
-#remove bsddb
+#remove bsddm, should port it but...
 sed '/^Modules\/_bsddb/d' -i Makefile
 sed 's/ Modules\/_bsddb$(SO)//'  -i Makefile
 
