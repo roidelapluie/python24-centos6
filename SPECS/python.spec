@@ -23,7 +23,7 @@
 
 Summary: An interpreted, interactive, object-oriented programming language.
 Name: %{python}
-Version: %{pybasever}.3
+Version: %{pybasever}.6
 Release: JENKINS_BUILD%{?dist}
 License: PSF - see LICENSE
 Group: Development/Languages

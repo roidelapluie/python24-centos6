@@ -4,4 +4,4 @@ cp -rv SOURCES/* ~/rpmbuild/SOURCES/
 sed -i 's/JENKINS_BUILD/'$BUILD_NUMBER'/' SPECS/python.spec
 [ -d tmp ] && rm -rvf tmp
 mkdir -p tmp
-rpmbuild  --define="_topdir $PWD" --define="_tmppath $PWD/tmp" -ba SPECS/python.spec
+rpmbuild --define="version ${PYVERSION}" --define="_topdir $PWD" --define="_tmppath $PWD/tmp" -ba SPECS/python.spec
